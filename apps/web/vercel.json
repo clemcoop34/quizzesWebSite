@@ -1,5 +1,4 @@
 {
   "installCommand": "cd ../.. && corepack enable && corepack prepare pnpm@9.15.4 --activate && pnpm install --frozen-lockfile",
-  "buildCommand": "cd ../.. && pnpm --filter @quiz/shared build && pnpm --filter @quiz/web build",
-  "outputDirectory": ".next"
+  "buildCommand": "cd ../.. && pnpm --filter @quiz/shared build && pnpm --filter @quiz/web build"
 }
