@@ -164,10 +164,11 @@ Dans Render :
 DATABASE_URL=<URL_POSTGRES_NEON>
 REDIS_URL=<URL_REDIS_UPSTASH>
 WEB_ORIGIN=<URL_DU_SITE_VERCEL>
+WEB_ORIGINS=<URL_DU_SITE_VERCEL>
 NODE_ENV=production
 ```
 
-Au premier déploiement, `WEB_ORIGIN` peut être provisoirement `http://localhost:3000`, puis tu le remplaceras par l'URL Vercel quand elle existera.
+Au premier déploiement, `WEB_ORIGIN` et `WEB_ORIGINS` peuvent être provisoirement `http://localhost:3000`, puis tu les remplaceras par l'URL Vercel quand elle existera. `WEB_ORIGINS` accepte plusieurs origines séparées par des virgules.
 
 Commandes Render prévues par `render.yaml` :
 
@@ -206,13 +207,14 @@ NEXT_PUBLIC_API_URL=https://TON-API.onrender.com
 NEXT_PUBLIC_SOCKET_URL=https://TON-API.onrender.com
 ```
 
-Après le premier déploiement Vercel, retourne dans Render et remplace `WEB_ORIGIN` par l'URL Vercel :
+Après le premier déploiement Vercel, retourne dans Render/Railway et remplace `WEB_ORIGIN` et `WEB_ORIGINS` par l'URL Vercel :
 
 ```bash
 WEB_ORIGIN=https://TON-SITE.vercel.app
+WEB_ORIGINS=https://TON-SITE.vercel.app
 ```
 
-Redéploie ensuite l'API Render.
+Redéploie ensuite l'API.
 
 ### Continuer à améliorer depuis ici
 

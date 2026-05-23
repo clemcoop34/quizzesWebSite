@@ -2,6 +2,7 @@ import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import { AppModule } from "./app.module.js";
+import { isAllowedWebOrigin } from "./cors-origins.js";
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -10,7 +11,9 @@ async function bootstrap() {
   app.useBodyParser("json", { limit: "8mb" });
   app.useBodyParser("urlencoded", { extended: true, limit: "8mb" });
   app.enableCors({
-    origin: process.env.WEB_ORIGIN ?? "http://localhost:3000",
+    origin: (origin, callback) => {
+      callback(null, isAllowedWebOrigin(origin));
+    },
     credentials: true
   });
 

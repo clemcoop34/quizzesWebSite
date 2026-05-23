@@ -17,6 +17,7 @@ import type {
   StartGamePayload
 } from "@quiz/shared";
 import type { Server, Socket } from "socket.io";
+import { getAllowedWebOrigins } from "../cors-origins.js";
 import { GamesService } from "../games/games.service.js";
 import { RoomsService } from "../rooms/rooms.service.js";
 
@@ -25,7 +26,7 @@ type QuizServer = Server<ClientToServerEvents, ServerToClientEvents>;
 
 @WebSocketGateway({
   cors: {
-    origin: process.env.WEB_ORIGIN ?? "http://localhost:3000",
+    origin: getAllowedWebOrigins(),
     credentials: true
   }
 })
