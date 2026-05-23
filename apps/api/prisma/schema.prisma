@@ -1,0 +1,201 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoomStatus {
+  LOBBY
+  PLAYING
+  FINISHED
+}
+
+enum GameSessionStatus {
+  INITIALIZED
+  ACTIVE
+  FINISHED
+}
+
+enum QuestionType {
+  MULTIPLE_CHOICE
+  IMAGE_MULTIPLE_CHOICE
+  IMAGE_REGION
+  OPEN_TEXT
+}
+
+enum QuizReportReason {
+  WRONG_CONTENT
+  OFFENSIVE_CONTENT
+  INCORRECT_UNESS_METADATA
+  OTHER
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String?  @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  quizzes Quiz[]
+  players Player[]
+}
+
+model Quiz {
+  id          String     @id @default(cuid())
+  title       String
+  description String?
+  ownerId     String?
+  likesCount  Int        @default(0)
+  reportCount Int        @default(0)
+  correctionPercent Int  @default(0)
+  sourceType  String?
+  sourceCity  String?
+  sourceYear  String?
+  trainingYear String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  owner     User?      @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  questions Question[]
+  rooms     Room[]
+  sessions  GameSession[]
+  quizTags  QuizTag[]
+  reports   QuizReport[]
+}
+
+model Question {
+  id        String   @id @default(cuid())
+  quizId    String
+  type      QuestionType @default(MULTIPLE_CHOICE)
+  prompt    String
+  imageUrl  String?
+  imageRegions Json     @default("[]")
+  imageRegionExplanation String?
+  acceptedTextAnswers String[] @default([])
+  order     Int
+  durationMs Int     @default(20000)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  quiz          Quiz           @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  answerOptions AnswerOption[]
+  playerAnswers PlayerAnswer[]
+
+  @@unique([quizId, order])
+}
+
+model AnswerOption {
+  id         String   @id @default(cuid())
+  questionId String
+  label      String
+  isCorrect  Boolean  @default(false)
+  explanation String?
+  order      Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  question      Question       @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  playerAnswers PlayerAnswer[]
+
+  @@unique([questionId, order])
+}
+
+model QuizReport {
+  id        String           @id @default(cuid())
+  quizId    String
+  reporterKey String
+  reason    QuizReportReason
+  createdAt DateTime         @default(now())
+
+  quiz Quiz @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  @@unique([quizId, reporterKey])
+}
+
+model Tag {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  quizTags QuizTag[]
+}
+
+model QuizTag {
+  quizId String
+  tagId  String
+
+  quiz Quiz @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([quizId, tagId])
+}
+
+model Room {
+  id        String     @id @default(cuid())
+  code      String     @unique
+  status    RoomStatus @default(LOBBY)
+  quizId    String?
+  hostPlayerId String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  quiz     Quiz?         @relation(fields: [quizId], references: [id], onDelete: SetNull)
+  players  Player[]
+  sessions GameSession[]
+}
+
+model GameSession {
+  id        String            @id @default(cuid())
+  roomId    String
+  quizId    String
+  modeId    String
+  status    GameSessionStatus @default(INITIALIZED)
+  startedAt DateTime?
+  endedAt   DateTime?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  room          Room           @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  quiz          Quiz           @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  playerAnswers PlayerAnswer[]
+}
+
+model Player {
+  id          String   @id @default(cuid())
+  roomId      String
+  userId      String?
+  displayName String
+  score       Int      @default(0)
+  socketId    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  room          Room           @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user          User?          @relation(fields: [userId], references: [id], onDelete: SetNull)
+  playerAnswers PlayerAnswer[]
+}
+
+model PlayerAnswer {
+  id             String   @id @default(cuid())
+  sessionId      String
+  playerId       String
+  questionId     String
+  answerOptionId String?
+  textAnswer     String?
+  selectedPoint  Json?
+  answeredAt     DateTime @default(now())
+  isCorrect      Boolean
+  pointsAwarded  Int      @default(0)
+
+  session      GameSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  player       Player       @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  question     Question     @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  answerOption AnswerOption? @relation(fields: [answerOptionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, playerId, questionId])
+}

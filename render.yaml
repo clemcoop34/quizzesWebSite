@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: multiplayer-quiz-api
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: corepack enable && corepack prepare pnpm@9.15.4 --activate && pnpm install --frozen-lockfile && pnpm --filter @quiz/shared build && pnpm --filter @quiz/game-core build && pnpm --filter @quiz/api prisma:generate && pnpm --filter @quiz/api build
+    startCommand: pnpm --filter @quiz/api start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: WEB_ORIGIN
+        sync: false

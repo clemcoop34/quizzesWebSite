@@ -1,0 +1,4 @@
+ALTER TABLE "Quiz" ADD COLUMN "sourceType" TEXT;
+ALTER TABLE "Quiz" ADD COLUMN "sourceCity" TEXT;
+ALTER TABLE "Quiz" ADD COLUMN "sourceYear" TEXT;
+ALTER TABLE "Quiz" ADD COLUMN "trainingYear" TEXT;
