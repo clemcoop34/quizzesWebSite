@@ -4,7 +4,7 @@
     "buildCommand": "corepack enable && corepack prepare pnpm@9.15.4 --activate && pnpm install --frozen-lockfile && pnpm build:api"
   },
   "deploy": {
-    "startCommand": "pnpm start",
+    "startCommand": "pnpm db:deploy && pnpm start",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 120,
     "restartPolicyType": "ON_FAILURE",
