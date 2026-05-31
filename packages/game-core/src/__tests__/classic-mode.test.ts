@@ -57,6 +57,62 @@ describe("ClassicMode", () => {
     expect(result.payload.scores["player-2"]).toBe(0);
   });
 
+  it("uses dynamic question duration based on question text", () => {
+    const mode = new ClassicMode();
+    const state = mode.initialize({
+      sessionId: "session-1",
+      roomCode: "ABCD12",
+      modeId: "classic",
+      quiz: {
+        id: "quiz-timing",
+        title: "Timing quiz",
+        questions: [
+          {
+            id: "question-timing",
+            type: "multiple_choice",
+            prompt: "Un énoncé avec plusieurs mots pour calculer une durée adaptée",
+            order: 1,
+            durationMs: 10_000,
+            options: [
+              { id: "option-1", label: "Une proposition plutôt longue", isCorrect: true },
+              { id: "option-2", label: "Une autre proposition", isCorrect: false }
+            ]
+          }
+        ]
+      },
+      players
+    });
+
+    const started = mode.buildQuestionStartedPayload(
+      { ...state, status: "active", questionStartedAt: "2026-01-01T00:00:00.000Z" },
+      new Date("2026-01-01T00:00:00.000Z")
+    );
+
+    expect(started.timingMode).toBe("dynamic_timer");
+    expect(started.endsAt).toBeDefined();
+    expect(started.question.durationMs).toBeGreaterThan(10_000);
+  });
+
+  it("can start a question without timer", () => {
+    const mode = new ClassicMode();
+    const state = mode.initialize({
+      sessionId: "session-1",
+      roomCode: "ABCD12",
+      modeId: "classic",
+      quiz,
+      players,
+      timingMode: "no_timer"
+    });
+
+    const started = mode.buildQuestionStartedPayload(
+      { ...state, status: "active", questionStartedAt: "2026-01-01T00:00:00.000Z" },
+      new Date("2026-01-01T00:00:00.000Z")
+    );
+
+    expect(started.timingMode).toBe("no_timer");
+    expect(started.endsAt).toBeUndefined();
+  });
+
   it("rejects answers for a non-current question", () => {
     const mode = new ClassicMode();
     const state = mode.initialize({

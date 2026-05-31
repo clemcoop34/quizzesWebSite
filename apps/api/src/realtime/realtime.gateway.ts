@@ -10,12 +10,15 @@ import type {
   ClientToServerEvents,
   ErrorPayload,
   GameAnswerPayload,
+  GameBuzzPayload,
   GameSkipExplanationsPayload,
   JoinRoomPayload,
+  ReturnToLobbyPayload,
   SelectRoomQuizPayload,
   ServerToClientEvents,
   StartGamePayload
 } from "@quiz/shared";
+import { calculateQpucQuestionDurationMs, QPUC_BUZZ_ANSWER_TIME_MS } from "@quiz/shared";
 import type { Server, Socket } from "socket.io";
 import { getAllowedWebOrigins } from "../cors-origins.js";
 import { GamesService } from "../games/games.service.js";
@@ -36,7 +39,23 @@ export class RealtimeGateway implements OnGatewayConnection<QuizSocket> {
 
   private readonly roomCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly questionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly questionEndsAt = new Map<string, string>();
+  private readonly activeBuzzes = new Map<
+    string,
+    {
+      roomCode: string;
+      questionId: string;
+      playerId: string;
+      remainingMs: number;
+      startedAtMs: number;
+      segmentIndex?: number;
+      nextHandPlayerId?: string;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  private readonly qpucHandOverrides = new Map<string, { segmentIndex: number; playerId: string }>();
   private readonly roomCleanupGraceMs = Number(process.env.ROOM_CLEANUP_GRACE_MS ?? 30_000);
+  private readonly buzzAnswerTimeMs = QPUC_BUZZ_ANSWER_TIME_MS;
 
   constructor(
     private readonly roomsService: RoomsService,
@@ -91,6 +110,20 @@ export class RealtimeGateway implements OnGatewayConnection<QuizSocket> {
     }
   }
 
+  @SubscribeMessage("room:return_to_lobby")
+  async returnToLobby(@ConnectedSocket() client: QuizSocket, @MessageBody() payload: ReturnToLobbyPayload) {
+    try {
+      const state = await this.roomsService.returnToLobby(payload.code, client.id);
+      this.server.to(state.code).emit("room:state_updated", {
+        ...state,
+        currentPlayerId: undefined
+      });
+      client.emit("room:state_updated", state);
+    } catch (error) {
+      this.emitError(client, error);
+    }
+  }
+
   @SubscribeMessage("game:start")
   async startGame(@ConnectedSocket() client: QuizSocket, @MessageBody() payload: StartGamePayload) {
     try {
@@ -106,13 +139,99 @@ export class RealtimeGateway implements OnGatewayConnection<QuizSocket> {
   @SubscribeMessage("game:answer")
   async answer(@ConnectedSocket() client: QuizSocket, @MessageBody() payload: GameAnswerPayload) {
     try {
-      const { receipt, shouldEndQuestion } = await this.gamesService.answer(payload, client.id);
+      const activeBuzzBeforeAnswer = this.activeBuzzes.get(payload.sessionId);
+
+      if (activeBuzzBeforeAnswer && activeBuzzBeforeAnswer.questionId === payload.questionId) {
+        const { player } = await this.roomsService.getPlayerForSocket(payload.roomCode, client.id);
+
+        if (player.id !== activeBuzzBeforeAnswer.playerId) {
+          throw new Error("Seul le joueur qui a buzzé peut répondre.");
+        }
+      }
+
+      const answerTimestamp =
+        activeBuzzBeforeAnswer &&
+        activeBuzzBeforeAnswer.questionId === payload.questionId
+          ? new Date(activeBuzzBeforeAnswer.startedAtMs)
+          : new Date();
+      const { receipt, shouldEndQuestion, isCorrect } = await this.gamesService.answer(payload, client.id, answerTimestamp);
       this.server.to(payload.roomCode).emit("game:answer_received", receipt);
+      const activeBuzz = this.activeBuzzes.get(payload.sessionId);
+
+      if (activeBuzz && activeBuzz.questionId === payload.questionId && activeBuzz.playerId === receipt.playerId) {
+        clearTimeout(activeBuzz.timer);
+        this.activeBuzzes.delete(payload.sessionId);
+
+        if (shouldEndQuestion) {
+          this.clearQuestionTimer(payload.sessionId);
+          this.qpucHandOverrides.delete(payload.sessionId);
+          await this.endQuestionAndContinue(payload.sessionId, payload.roomCode);
+          return;
+        }
+
+        if (!isCorrect) {
+          this.switchHandAfterFailedBuzz(payload.sessionId, activeBuzz);
+        }
+
+        this.resumeQuestionAfterBuzz(payload.sessionId, activeBuzz);
+        return;
+      }
 
       if (shouldEndQuestion) {
         this.clearQuestionTimer(payload.sessionId);
+        this.qpucHandOverrides.delete(payload.sessionId);
         await this.endQuestionAndContinue(payload.sessionId, payload.roomCode);
       }
+    } catch (error) {
+      this.emitError(client, error);
+    }
+  }
+
+  @SubscribeMessage("game:buzz")
+  async buzz(@ConnectedSocket() client: QuizSocket, @MessageBody() payload: GameBuzzPayload) {
+    try {
+      const { player } = await this.roomsService.getPlayerForSocket(payload.roomCode, client.id);
+      const currentEndsAt = this.questionEndsAt.get(payload.sessionId);
+
+      if (!currentEndsAt || this.activeBuzzes.has(payload.sessionId)) {
+        return;
+      }
+
+      const handState = await this.getQpucHand(payload.sessionId);
+
+      if (handState && player.id !== handState.handPlayerId) {
+        throw new Error("Ce n'est pas à toi d'avoir la main.");
+      }
+
+      const remainingMs = Math.max(1_000, Date.parse(currentEndsAt) - Date.now());
+      this.clearQuestionTimer(payload.sessionId);
+
+      const startedAtMs = Date.now();
+      const timer = setTimeout(() => {
+        const activeBuzz = this.activeBuzzes.get(payload.sessionId);
+        if (!activeBuzz) return;
+        this.activeBuzzes.delete(payload.sessionId);
+        this.switchHandAfterFailedBuzz(payload.sessionId, activeBuzz);
+        this.resumeQuestionAfterBuzz(payload.sessionId, activeBuzz);
+      }, this.buzzAnswerTimeMs);
+
+      this.activeBuzzes.set(payload.sessionId, {
+        roomCode: payload.roomCode,
+        questionId: payload.questionId,
+        playerId: player.id,
+        remainingMs,
+        startedAtMs,
+        segmentIndex: handState?.segmentIndex,
+        nextHandPlayerId: handState ? this.getOpposingPlayerId(handState.playerIds, player.id) : undefined,
+        timer
+      });
+      this.server.to(payload.roomCode).emit("game:buzz_started", {
+        sessionId: payload.sessionId,
+        roomCode: payload.roomCode,
+        questionId: payload.questionId,
+        playerId: player.id,
+        answerEndsAt: new Date(startedAtMs + this.buzzAnswerTimeMs).toISOString()
+      });
     } catch (error) {
       this.emitError(client, error);
     }
@@ -133,15 +252,46 @@ export class RealtimeGateway implements OnGatewayConnection<QuizSocket> {
     }
   }
 
-  private scheduleQuestionEnd(sessionId: string, roomCode: string, endsAt: string): void {
+  private scheduleQuestionEnd(sessionId: string, roomCode: string, endsAt?: string): void {
+    if (!endsAt) {
+      this.clearQuestionTimer(sessionId);
+      this.questionEndsAt.delete(sessionId);
+      return;
+    }
+
     const delayMs = Math.max(0, Date.parse(endsAt) - Date.now());
 
     this.clearQuestionTimer(sessionId);
+    this.questionEndsAt.set(sessionId, endsAt);
     const timer = setTimeout(() => {
       this.questionTimers.delete(sessionId);
+      this.questionEndsAt.delete(sessionId);
+      this.qpucHandOverrides.delete(sessionId);
       void this.endQuestionAndContinue(sessionId, roomCode);
     }, delayMs);
     this.questionTimers.set(sessionId, timer);
+  }
+
+  private resumeQuestionAfterBuzz(
+    sessionId: string,
+    activeBuzz: {
+      roomCode: string;
+      questionId: string;
+      remainingMs: number;
+      playerId?: string;
+      segmentIndex?: number;
+      nextHandPlayerId?: string;
+    }
+  ): void {
+    const endsAt = new Date(Date.now() + activeBuzz.remainingMs).toISOString();
+    this.scheduleQuestionEnd(sessionId, activeBuzz.roomCode, endsAt);
+    this.server.to(activeBuzz.roomCode).emit("game:buzz_ended", {
+      sessionId,
+      roomCode: activeBuzz.roomCode,
+      questionId: activeBuzz.questionId,
+      endsAt,
+      ...this.getBuzzHandPayload(activeBuzz)
+    });
   }
 
   private clearQuestionTimer(sessionId: string): void {
@@ -156,6 +306,7 @@ export class RealtimeGateway implements OnGatewayConnection<QuizSocket> {
   }
 
   private async continueAfterExplanations(sessionId: string, roomCode: string): Promise<void> {
+    this.qpucHandOverrides.delete(sessionId);
     const next = await this.gamesService.nextQuestion(sessionId);
 
     if (next) {
@@ -167,6 +318,71 @@ export class RealtimeGateway implements OnGatewayConnection<QuizSocket> {
     const finished = await this.gamesService.finish(sessionId);
     this.clearQuestionTimer(sessionId);
     this.server.to(roomCode).emit("game:finished", finished);
+  }
+
+  private async getQpucHand(
+    sessionId: string
+  ): Promise<{ handPlayerId: string; segmentIndex: number; playerIds: string[] } | null> {
+    const state = await this.gamesService.getLiveSession(sessionId);
+
+    if (!state || state.modeId !== "qpuc_face_to_face") {
+      return null;
+    }
+
+    const question = state.quiz.qpucQuestions?.[state.currentQuestionIndex];
+    const playerIds = state.players.map((player) => player.id);
+    const baseHandPlayerId =
+      state.qpucBaseHandPlayerId ?? state.players.find((player) => player.isHost)?.id ?? state.players[0]?.id;
+
+    if (!question || playerIds.length !== 2 || !baseHandPlayerId) {
+      return null;
+    }
+
+    const durationMs = calculateQpucQuestionDurationMs(question.clues);
+    const currentEndsAt = this.questionEndsAt.get(sessionId);
+    const elapsedMs = currentEndsAt
+      ? durationMs - Math.max(0, Date.parse(currentEndsAt) - Date.now())
+      : state.questionStartedAt
+        ? Date.now() - Date.parse(state.questionStartedAt)
+        : 0;
+    const segmentIndex = Math.min(3, Math.max(0, Math.floor((Math.max(0, elapsedMs) / durationMs) * 4)));
+    const otherPlayerId = this.getOpposingPlayerId(playerIds, baseHandPlayerId);
+    const naturalHandPlayerId = segmentIndex % 2 === 0 ? baseHandPlayerId : otherPlayerId;
+    const override = this.qpucHandOverrides.get(sessionId);
+
+    return {
+      handPlayerId: override?.segmentIndex === segmentIndex ? override.playerId : naturalHandPlayerId,
+      segmentIndex,
+      playerIds
+    };
+  }
+
+  private switchHandAfterFailedBuzz(
+    sessionId: string,
+    activeBuzz: { segmentIndex?: number; nextHandPlayerId?: string }
+  ): void {
+    if (activeBuzz.segmentIndex === undefined || !activeBuzz.nextHandPlayerId) {
+      return;
+    }
+
+    this.qpucHandOverrides.set(sessionId, {
+      segmentIndex: activeBuzz.segmentIndex,
+      playerId: activeBuzz.nextHandPlayerId
+    });
+  }
+
+  private getBuzzHandPayload(activeBuzz: { segmentIndex?: number; nextHandPlayerId?: string; playerId?: string }) {
+    return activeBuzz.segmentIndex !== undefined && activeBuzz.nextHandPlayerId
+      ? {
+          handPlayerId: activeBuzz.nextHandPlayerId,
+          segmentIndex: activeBuzz.segmentIndex,
+          wrongPlayerId: activeBuzz.playerId
+        }
+      : {};
+  }
+
+  private getOpposingPlayerId(playerIds: string[], playerId: string): string {
+    return playerIds.find((candidate) => candidate !== playerId) ?? playerId;
   }
 
   private async handleDisconnecting(client: QuizSocket): Promise<void> {

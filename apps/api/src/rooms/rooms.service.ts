@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { customAlphabet } from "nanoid";
 import type { RoomQuizPreviewDto, RoomStateDto } from "@quiz/shared";
+import { getCompatibleGameModesForQuiz, parseQpucProgressiveQuestions } from "@quiz/shared";
 import { LiveStateService } from "../live-state/live-state.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 import type { CreateRoomBody } from "./rooms.controller.js";
@@ -151,6 +152,42 @@ export class RoomsService {
     return this.getState(normalizedCode);
   }
 
+  async returnToLobby(code: string, socketId: string): Promise<RoomStateDto> {
+    const normalizedCode = code.toUpperCase();
+    const room = await this.prisma.room.findUnique({
+      where: { code: normalizedCode },
+      include: {
+        players: true,
+        sessions: true
+      }
+    });
+
+    if (!room) {
+      throw new NotFoundException("Room not found");
+    }
+
+    const requester = room.players.find((player) => player.socketId === socketId);
+
+    if (!requester || requester.id !== room.hostPlayerId) {
+      throw new BadRequestException("Only the room creator can return to the lobby");
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.room.update({
+        where: { id: room.id },
+        data: { status: "LOBBY" }
+      }),
+      this.prisma.player.updateMany({
+        where: { roomId: room.id },
+        data: { score: 0 }
+      })
+    ]);
+
+    await Promise.all(room.sessions.map((session) => this.liveState.delete(session.id)));
+
+    return this.getState(normalizedCode);
+  }
+
   async getState(code: string): Promise<RoomStateDto> {
     const room = await this.prisma.room.findUnique({
       where: { code: code.toUpperCase() },
@@ -161,7 +198,9 @@ export class RoomsService {
               orderBy: { order: "asc" },
               select: {
                 id: true,
-                prompt: true
+                prompt: true,
+                type: true,
+                acceptedTextAnswers: true
               }
             },
             quizTags: {
@@ -212,6 +251,15 @@ export class RoomsService {
     const existingPlayer = playerId ? room.players.find((player) => player.id === playerId) : undefined;
 
     if (existingPlayer) {
+      if (existingPlayer.socketId && existingPlayer.socketId !== socketId) {
+        const state = await this.getState(normalizedCode);
+
+        return {
+          ...state,
+          currentPlayerId: undefined
+        };
+      }
+
       await this.prisma.player.update({
         where: { id: existingPlayer.id },
         data: { socketId }
@@ -302,9 +350,12 @@ function toRoomQuizPreview(quiz: {
   sourceCity: string | null;
   sourceYear: string | null;
   trainingYear: string | null;
+  qpucQuestions: unknown;
   questions: Array<{
     id: string;
     prompt: string;
+    type: string;
+    acceptedTextAnswers: string[];
   }>;
   quizTags: Array<{ tag: { name: string } }>;
 }): RoomQuizPreviewDto {
@@ -317,6 +368,16 @@ function toRoomQuizPreview(quiz: {
     sourceYear: quiz.sourceYear ?? undefined,
     trainingYear: quiz.trainingYear ?? undefined,
     tags: quiz.quizTags.map((quizTag) => quizTag.tag.name),
-    questions: quiz.questions
+    compatibleGameModes: getCompatibleGameModesForQuiz({
+      sourceType: quiz.sourceType,
+      qpucQuestions: quiz.qpucQuestions,
+      questionCount: quiz.questions.length,
+      questions: quiz.questions
+    }),
+    qpucQuestionCount: parseQpucProgressiveQuestions(quiz.qpucQuestions).length,
+    questions: quiz.questions.map((question) => ({
+      id: question.id,
+      prompt: question.prompt
+    }))
   };
 }

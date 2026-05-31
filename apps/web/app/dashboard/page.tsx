@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { getCompatibleGameModesForQuiz, parseQpucProgressiveQuestions } from "@quiz/shared";
 import { DashboardClient } from "./dashboard-client";
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
@@ -56,6 +57,7 @@ function toDashboardQuiz(quiz: {
   sourceCity?: string | null;
   sourceYear?: string | null;
   trainingYear?: string | null;
+  qpucQuestions?: unknown;
   _count?: { questions: number };
   quizTags?: Array<{ tag: { name: string } }>;
 }) {
@@ -70,6 +72,12 @@ function toDashboardQuiz(quiz: {
     sourceYear: quiz.sourceYear ?? null,
     trainingYear: quiz.trainingYear ?? null,
     questionsCount: quiz._count?.questions ?? 0,
+    qpucQuestionCount: parseQpucProgressiveQuestions(quiz.qpucQuestions).length,
+    compatibleGameModes: getCompatibleGameModesForQuiz({
+      sourceType: quiz.sourceType,
+      qpucQuestions: quiz.qpucQuestions,
+      questionCount: quiz._count?.questions ?? 0
+    }),
     tags: quiz.quizTags?.map((quizTag) => quizTag.tag.name) ?? []
   };
 }

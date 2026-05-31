@@ -1,5 +1,5 @@
 import { Module } from "@nestjs/common";
-import { ClassicMode, GameModeRegistry } from "@quiz/game-core";
+import { ClassicMode, GameModeRegistry, QpucFaceToFaceMode } from "@quiz/game-core";
 
 @Module({
   providers: [
@@ -8,6 +8,7 @@ import { ClassicMode, GameModeRegistry } from "@quiz/game-core";
       useFactory: () => {
         const registry = new GameModeRegistry();
         registry.register(new ClassicMode());
+        registry.register(new QpucFaceToFaceMode());
         return registry;
       }
     }

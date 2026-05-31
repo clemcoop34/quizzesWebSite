@@ -2,7 +2,12 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { QUIZ_CORRECTION_FILTER_THRESHOLD, QUIZ_REPORT_HIDE_THRESHOLD } from "@quiz/shared";
+import {
+  GAME_MODE_DEFINITIONS,
+  QUIZ_CORRECTION_FILTER_THRESHOLD,
+  QUIZ_REPORT_HIDE_THRESHOLD,
+  type GameModeId
+} from "@quiz/shared";
 
 interface DashboardQuiz {
   id: string;
@@ -11,11 +16,13 @@ interface DashboardQuiz {
   reportCount: number;
   correctionPercent: number;
   questionsCount: number;
+  qpucQuestionCount: number;
   tags: string[];
   sourceType?: string | null;
   sourceCity?: string | null;
   sourceYear?: string | null;
   trainingYear?: string | null;
+  compatibleGameModes: GameModeId[];
 }
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
@@ -37,6 +44,7 @@ export function DashboardClient({
   const [selectedCity, setSelectedCity] = useState("");
   const [selectedSourceYear, setSelectedSourceYear] = useState("");
   const [selectedTrainingYear, setSelectedTrainingYear] = useState("");
+  const [selectedGameModes, setSelectedGameModes] = useState<GameModeId[]>([]);
   const [onlyCorrected, setOnlyCorrected] = useState(false);
   const [isCreatingRoomFor, setIsCreatingRoomFor] = useState<string | null>(null);
   const [quizzes, setQuizzes] = useState(initialQuizzes);
@@ -75,6 +83,8 @@ export function DashboardClient({
       const matchesCity = !selectedCity || quiz.sourceCity === selectedCity;
       const matchesSourceYear = !selectedSourceYear || quiz.sourceYear === selectedSourceYear;
       const matchesTrainingYear = !selectedTrainingYear || quiz.trainingYear === selectedTrainingYear;
+      const matchesGameModes =
+        selectedGameModes.length === 0 || selectedGameModes.every((modeId) => quiz.compatibleGameModes.includes(modeId));
       const passesReportFilter = quiz.reportCount < QUIZ_REPORT_HIDE_THRESHOLD || isExactTitleSearch;
       const passesCorrectionFilter =
         !onlyCorrected || quiz.correctionPercent >= QUIZ_CORRECTION_FILTER_THRESHOLD;
@@ -85,15 +95,22 @@ export function DashboardClient({
         matchesCity &&
         matchesSourceYear &&
         matchesTrainingYear &&
+        matchesGameModes &&
         passesReportFilter &&
         passesCorrectionFilter
       );
     });
-  }, [quizzes, search, selectedTags, selectedCity, selectedSourceYear, selectedTrainingYear, onlyCorrected]);
+  }, [quizzes, search, selectedTags, selectedCity, selectedSourceYear, selectedTrainingYear, selectedGameModes, onlyCorrected]);
 
   function toggleTag(tag: string) {
     setSelectedTags((previous) =>
       previous.includes(tag) ? previous.filter((selectedTag) => selectedTag !== tag) : [...previous, tag]
+    );
+  }
+
+  function toggleGameMode(modeId: GameModeId) {
+    setSelectedGameModes((previous) =>
+      previous.includes(modeId) ? previous.filter((selectedModeId) => selectedModeId !== modeId) : [...previous, modeId]
     );
   }
 
@@ -174,6 +191,23 @@ export function DashboardClient({
         </div>
 
         <div className="filter-group stack">
+          <h3>Modes</h3>
+          <div className="tag-list">
+            {(Object.keys(GAME_MODE_DEFINITIONS) as GameModeId[]).map((modeId) => (
+              <button
+                className={selectedGameModes.includes(modeId) ? "tag-pill tag-pill-selected" : "tag-pill"}
+                key={modeId}
+                type="button"
+                onClick={() => toggleGameMode(modeId)}
+                title={GAME_MODE_DEFINITIONS[modeId].description}
+              >
+                {GAME_MODE_DEFINITIONS[modeId].shortLabel}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="filter-group stack">
           <h3>Tags</h3>
         <div className="tag-list">
           <button
@@ -213,6 +247,7 @@ export function DashboardClient({
                 <h2>{quiz.title}</h2>
                 <p className="muted">
                   {quiz.questionsCount} questions · {quiz.likesCount} likes
+                  {quiz.qpucQuestionCount > 0 ? ` · ${quiz.qpucQuestionCount} face-à-face` : ""}
                 </p>
               </div>
               {quiz.sourceType === "uness" ? (
@@ -227,6 +262,11 @@ export function DashboardClient({
                 {quiz.correctionPercent > correctionDisplayMinPercent ? (
                   <span className="compact-pill compact-pill-accent">Corrigé {quiz.correctionPercent}%</span>
                 ) : null}
+                {quiz.compatibleGameModes.map((modeId) => (
+                  <span className="compact-pill compact-pill-mode" key={modeId}>
+                    {GAME_MODE_DEFINITIONS[modeId].shortLabel}
+                  </span>
+                ))}
                 {quiz.tags.slice(0, visibleTagLimit).map((tag) => (
                   <span className="compact-pill" key={tag}>
                     {tag}

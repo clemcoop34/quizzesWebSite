@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type PointerEvent } from "react";
-import type { ImagePointDto, ImageRegionDto, QuizReportReason } from "@quiz/shared";
+import { calculateClassicQuestionDurationMs, type GameQuestionTimingMode, type ImagePointDto, type ImageRegionDto, type QuizReportReason } from "@quiz/shared";
 
 interface SoloQuiz {
   id: string;
@@ -36,7 +36,9 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   const [selectedPoint, setSelectedPoint] = useState<ImagePointDto | null>(null);
   const [textAnswer, setTextAnswer] = useState("");
   const [answerValidated, setAnswerValidated] = useState(false);
+  const [timingMode, setTimingMode] = useState<GameQuestionTimingMode>("dynamic_timer");
   const [answers, setAnswers] = useState<Record<string, SoloAnswer>>({});
+  const [sessionQuestions, setSessionQuestions] = useState(() => quiz.questions);
   const [startedAt, setStartedAt] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   const [likedQuizIds, setLikedQuizIds] = useState<string[]>([]);
@@ -44,13 +46,21 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   const [reportReason, setReportReason] = useState<QuizReportReason | "">("");
   const [showReportModal, setShowReportModal] = useState(false);
 
-  const question = quiz.questions[questionIndex];
-  const endsAt = startedAt + (question?.durationMs ?? 20_000);
-  const remainingMs = Math.max(0, endsAt - now);
-  const remainingRatio = question ? Math.max(0, Math.min(1, remainingMs / question.durationMs)) : 0;
+  const question = sessionQuestions[questionIndex];
+  const currentQuestionDurationMs = question
+    ? calculateClassicQuestionDurationMs({
+        prompt: question.prompt,
+        options: question.answerOptions,
+        acceptedTextAnswers: question.acceptedTextAnswers
+      })
+    : 20_000;
+  const endsAt = startedAt + currentQuestionDurationMs;
+  const remainingMs = timingMode === "no_timer" ? null : Math.max(0, endsAt - now);
+  const remainingRatio =
+    question && timingMode === "dynamic_timer" ? Math.max(0, Math.min(1, (remainingMs ?? 0) / currentQuestionDurationMs)) : 0;
   const score = useMemo(
-    () => quiz.questions.reduce((total, candidate) => total + gradeSoloAnswer(candidate, answers[candidate.id]).scoreRatio, 0),
-    [quiz.questions, answers]
+    () => sessionQuestions.reduce((total, candidate) => total + gradeSoloAnswer(candidate, answers[candidate.id]).scoreRatio, 0),
+    [sessionQuestions, answers]
   );
   const currentCorrectOptionIds = question?.answerOptions.filter((option) => option.isCorrect).map((option) => option.id) ?? [];
 
@@ -65,7 +75,7 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   }, []);
 
   useEffect(() => {
-    if (phase !== "playing" || remainingMs > 0) {
+    if (phase !== "playing" || timingMode === "no_timer" || (remainingMs ?? 0) > 0) {
       return;
     }
 
@@ -73,6 +83,8 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   }, [phase, remainingMs]);
 
   function start() {
+    const shuffledQuestions = shuffleArray(quiz.questions);
+    setSessionQuestions(shuffledQuestions);
     setAnswers({});
     setQuestionIndex(0);
     setSelectedOptionIds([]);
@@ -133,13 +145,13 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   }
 
   function goToNextQuestion(nextAnswers: Record<string, SoloAnswer>) {
-    if (questionIndex >= quiz.questions.length - 1) {
+    if (questionIndex >= sessionQuestions.length - 1) {
       setPhase("finished");
       return;
     }
 
     const nextIndex = questionIndex + 1;
-    const nextQuestion = quiz.questions[nextIndex];
+    const nextQuestion = sessionQuestions[nextIndex];
     const previousAnswer = nextAnswers[nextQuestion.id];
     setQuestionIndex(nextIndex);
     setSelectedOptionIds(previousAnswer?.optionIds ?? []);
@@ -195,6 +207,16 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
         <section className="panel stack">
           <h1>{quiz.title}</h1>
           <p className="muted">{quiz.questions.length} questions en solo.</p>
+          <div className="timing-options" aria-label="Rythme du quiz">
+            <button
+              aria-pressed={timingMode === "no_timer"}
+              className={timingMode === "no_timer" ? "timing-option timing-option-active" : "timing-option"}
+              type="button"
+              onClick={() => setTimingMode((current) => (current === "no_timer" ? "dynamic_timer" : "no_timer"))}
+            >
+              {timingMode === "no_timer" ? "Sans chrono activé" : "Sans chrono"}
+            </button>
+          </div>
           <button type="button" onClick={start}>
             Lancer
           </button>
@@ -209,9 +231,9 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
         <section className="panel stack">
           <h1>{quiz.title}</h1>
           <h2>
-            Score : {score} / {quiz.questions.length}
+            Score : {score} / {sessionQuestions.length}
           </h2>
-          {quiz.questions.map((finishedQuestion) => {
+          {sessionQuestions.map((finishedQuestion) => {
             const answer = answers[finishedQuestion.id];
             const grade = gradeSoloAnswer(finishedQuestion, answer);
             const correct = grade.status === "perfect";
@@ -278,13 +300,17 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
       <section className="panel stack">
         <div className="row" style={{ justifyContent: "space-between" }}>
           <p className="muted">
-            Question {questionIndex + 1} / {quiz.questions.length}
+            Question {questionIndex + 1} / {sessionQuestions.length}
           </p>
-          <p className="muted">{Math.ceil(remainingMs / 1000)}s</p>
+          <p className="muted">{timingMode === "no_timer" ? "Sans chrono" : `${Math.ceil((remainingMs ?? 0) / 1000)}s`}</p>
         </div>
-        <div className="timer-track" aria-hidden="true">
-          <div className="timer-fill" style={{ width: `${remainingRatio * 100}%` }} />
-        </div>
+        {timingMode === "no_timer" ? (
+          <div className="no-timer-track">La question passera quand tu auras validé ta réponse.</div>
+        ) : (
+          <div className="timer-track" aria-hidden="true">
+            <div className="timer-fill" style={{ width: `${remainingRatio * 100}%` }} />
+          </div>
+        )}
         <h1>{quiz.title}</h1>
         <h2>{question.prompt}</h2>
         {question.imageUrl && question.type !== "IMAGE_REGION" ? <img className="question-image" src={question.imageUrl} alt="" /> : null}
@@ -346,9 +372,9 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
             aria-pressed={answerValidated}
             className={answerValidated ? "commit-answer-button commit-answer-button-active" : "commit-answer-button"}
             type="button"
-            onClick={validateCurrentAnswer}
-          >
-            {answerValidated ? "Réponse validée" : "Valider ma réponse"}
+          onClick={validateCurrentAnswer}
+        >
+            {answerValidated ? "Réponse validée" : timingMode === "no_timer" ? "Valider et passer à la correction" : "Valider ma réponse"}
           </button>
         ) : null}
       </section>
@@ -567,6 +593,17 @@ function toSvgPoints(points: ImagePointDto[]): string {
 
 function clamp(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+function shuffleArray<T>(items: T[]): T[] {
+  const shuffled = [...items];
+
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+  }
+
+  return shuffled;
 }
 
 function normalizeText(value: string) {

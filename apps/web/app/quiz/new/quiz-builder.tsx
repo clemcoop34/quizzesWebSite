@@ -13,6 +13,11 @@ import {
   MoodleHtmlExtractionError,
   type ExtractedQuestion
 } from "./moodle-html-extractor";
+import {
+  extractQpucQuestionsFromJson,
+  QpucJsonExtractionError,
+  type QpucExtractedQuestion
+} from "./qpuc-json-extractor";
 
 type QuestionType = "multiple_choice" | "image_multiple_choice" | "image_region" | "open_text";
 
@@ -32,6 +37,15 @@ interface DraftQuestion {
     difficulty: DocumentExtractedQuestion["difficulty"];
     sourceTopic: string;
   };
+}
+
+interface DraftQpucQuestion {
+  id: string;
+  theme?: string;
+  answer: string;
+  acceptedAnswers: string[];
+  clues: string[];
+  sourceReference?: string;
 }
 
 interface MetadataOptions {
@@ -186,6 +200,81 @@ Important :
 Ne montre pas ton raisonnement interne.
 Ne fournis que le fichier JSON téléchargeable.`;
 
+const qpucCompatibilityPrompt = `Tu es un expert en pédagogie médicale, en extraction de connaissances et en conception de questions progressives inspirées du mode "Face-à-face" de Questions pour un champion.
+
+Je vais te fournir un document de cours, le plus souvent un cours de médecine. Il peut aussi s'agir d'un cours de SHS, de santé publique, de physiologie, d'anatomie, de sémiologie, de pharmacologie ou d'une autre discipline médicale.
+
+Objectif :
+À partir du document fourni, génère un fichier JSON permettant d'ajouter une compatibilité "Face-à-face QPUC" à un quiz.
+
+Le principe :
+- Chaque question vise une réponse courte et précise : une structure anatomique, une pathologie, un mécanisme, un auteur, un concept, un examen, une molécule, une classification, etc.
+- La question est composée de 8 à 10 indices progressifs.
+- Les premiers indices doivent être les moins évidents, mais rester justes et utiles.
+- Les derniers indices doivent devenir franchement parlants.
+- Tous les indices doivent être strictement fondés sur le document fourni. N'invente aucune information externe.
+
+Esprit attendu des indices :
+- Pour une structure anatomique : commencer par le type de structure ou des rapports complexes, puis des rapports plus simples, puis la position, la fonction, l'innervation/vascularisation si pertinent, puis un indice très reconnaissable.
+- Pour une pathologie : commencer par un mécanisme, un facteur de risque ou une présentation indirecte, puis les signes, examens, complications, traitements ou éléments distinctifs.
+- Pour une molécule ou un traitement : commencer par la classe, le mécanisme ou une indication précise, puis les effets, contre-indications, effets indésirables, surveillance, puis le nom attendu.
+- Pour un cours de SHS : on peut viser un auteur, un concept ou une théorie, en commençant par les écrits, le contexte, les idées associées ou les influences, puis les éléments les plus reconnaissables.
+- Pour tout sujet : évite les indices triviaux au début. L'ordre doit donner une vraie progression du difficile vers le facile.
+
+Contraintes :
+- Génère idéalement 10 à 12 questions.
+- Chaque question doit contenir entre 8 et 10 indices.
+- Chaque réponse attendue doit avoir plusieurs variantes acceptées dès que c'est pertinent : nom complet, terme raccourci, acronyme, synonymes, pluriel/singulier, déterminants omis, forme avec ou sans adjectif, et formulation courante.
+- Exemple : si la réponse est "méthode sandwich", accepte aussi "sandwich" et toute formulation courte non ambiguë présente ou directement déduite du document.
+- Ne sois pas minimaliste sur accepted_answers : il vaut mieux fournir 3 à 8 variantes utiles quand la notion s'y prête.
+- Les questions doivent couvrir plusieurs parties du document.
+- Si une information n'est pas présente dans le document ou pas assez claire, ne l'utilise pas.
+- Les indices doivent être autonomes et compréhensibles une fois affichés.
+- Le JSON peut être ajouté à un quiz contenant déjà des QCM classiques : il ne remplace pas les QCM, il ajoute seulement une compatibilité avec le mode Face-à-face.
+
+Format de sortie :
+Crée un fichier téléchargeable au format .json nommé compatibilite_qpuc.json.
+Le contenu du fichier doit être uniquement un JSON valide, sans Markdown et sans bloc de code.
+Si ton interface ne permet pas de joindre un fichier téléchargeable, retourne uniquement le JSON brut.
+
+Structure exacte attendue :
+
+{
+  "mode": "qpuc_face_to_face",
+  "question_count": 10,
+  "questions": [
+    {
+      "id": 1,
+      "theme": "Anatomie du membre supérieur",
+      "answer": "Nerf médian",
+      "accepted_answers": ["nerf médian", "médian"],
+      "source_reference": "Section ou notion du document utilisée",
+      "clues": [
+        "Indice 1 difficile mais documenté",
+        "Indice 2 un peu moins difficile",
+        "Indice 3",
+        "Indice 4",
+        "Indice 5",
+        "Indice 6",
+        "Indice 7",
+        "Indice 8 très parlant"
+      ]
+    }
+  ]
+}
+
+Contrôle qualité silencieux avant réponse :
+- le JSON est valide ;
+- chaque question a une réponse courte ;
+- chaque question a 8 à 10 indices ;
+- les indices sont classés du moins évident au plus évident ;
+- chaque indice apparaît explicitement ou découle directement du document ;
+- aucune connaissance externe non fournie n'est utilisée.
+
+Important :
+Ne montre pas ton raisonnement interne.
+Ne fournis que le fichier JSON téléchargeable.`;
+
 export function QuizBuilder({
   initialMetadataOptions,
   initialTags
@@ -209,6 +298,12 @@ export function QuizBuilder({
   const [documentImportError, setDocumentImportError] = useState<string | null>(null);
   const [documentImportMessage, setDocumentImportMessage] = useState<string | null>(null);
   const [documentPromptCopied, setDocumentPromptCopied] = useState(false);
+  const [showQpucImport, setShowQpucImport] = useState(false);
+  const [qpucJson, setQpucJson] = useState("");
+  const [qpucQuestions, setQpucQuestions] = useState<DraftQpucQuestion[]>([]);
+  const [qpucImportError, setQpucImportError] = useState<string | null>(null);
+  const [qpucImportMessage, setQpucImportMessage] = useState<string | null>(null);
+  const [qpucPromptCopied, setQpucPromptCopied] = useState(false);
   const [importMessage, setImportMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -375,6 +470,36 @@ export function QuizBuilder({
     }
   }
 
+  function importQpucJson() {
+    setError(null);
+    setQpucImportError(null);
+    setQpucImportMessage(null);
+
+    if (!qpucJson.trim()) {
+      setQpucImportError("Dépose un fichier JSON ou colle son contenu avant d'importer.");
+      return;
+    }
+
+    try {
+      const extractedQuiz = extractQpucQuestionsFromJson(qpucJson);
+      const importedQuestions = extractedQuiz.questions.map(toDraftQpucQuestion);
+
+      setQpucQuestions((previous) => [...previous, ...importedQuestions]);
+      setQpucImportMessage(
+        `${importedQuestions.length} question${importedQuestions.length > 1 ? "s" : ""} à indices progressifs importée${
+          importedQuestions.length > 1 ? "s" : ""
+        }.`
+      );
+      setQpucJson("");
+    } catch (importError) {
+      setQpucImportError(
+        importError instanceof QpucJsonExtractionError
+          ? importError.message
+          : "Impossible de lire ce JSON. Vérifie qu'il respecte la structure attendue."
+      );
+    }
+  }
+
   function toggleTag(tag: string) {
     setSelectedTags((previous) =>
       previous.includes(tag) ? previous.filter((selectedTag) => selectedTag !== tag) : [...previous, tag]
@@ -412,10 +537,29 @@ export function QuizBuilder({
     }
   }
 
+  async function attachQpucJson(file: File) {
+    setError(null);
+    setQpucImportError(null);
+    setQpucImportMessage(null);
+
+    try {
+      const json = await fileToValidatedTextJson(file);
+      setQpucJson(json);
+    } catch (jsonError) {
+      setQpucImportError(jsonError instanceof Error ? jsonError.message : "Fichier JSON invalide.");
+    }
+  }
+
   async function copyDocumentPrompt() {
     await navigator.clipboard.writeText(documentQuizPrompt);
     setDocumentPromptCopied(true);
     window.setTimeout(() => setDocumentPromptCopied(false), 1500);
+  }
+
+  async function copyQpucPrompt() {
+    await navigator.clipboard.writeText(qpucCompatibilityPrompt);
+    setQpucPromptCopied(true);
+    window.setTimeout(() => setQpucPromptCopied(false), 1500);
   }
 
   async function submit() {
@@ -426,8 +570,8 @@ export function QuizBuilder({
       return;
     }
 
-    if (questions.length === 0) {
-      setError("Ajoute au moins une question.");
+    if (questions.length === 0 && qpucQuestions.length === 0) {
+      setError("Ajoute au moins une question ou une compatibilité QPUC.");
       return;
     }
 
@@ -473,7 +617,8 @@ export function QuizBuilder({
                 trainingYear: trainingYear.trim()
               }
             : {}),
-          questions: questions.map(toPayloadQuestion)
+          questions: questions.map(toPayloadQuestion),
+          qpucQuestions: qpucQuestions.map(toPayloadQpucQuestion)
         })
       });
 
@@ -662,6 +807,85 @@ export function QuizBuilder({
                 </button>
               </div>
               {documentImportMessage ? <p className="success-text">{documentImportMessage}</p> : null}
+            </div>
+          ) : null}
+        </section>
+
+        <section className="stack import-panel">
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <div>
+              <h2>Ajouter une compatibilité QPUC</h2>
+              <p className="muted">Optionnel : importe des questions à indices progressifs pour le mode Face-à-face.</p>
+            </div>
+            <button className="secondary-button" type="button" onClick={() => setShowQpucImport((value) => !value)}>
+              {showQpucImport ? "Masquer" : "Ajouter"}
+            </button>
+          </div>
+
+          {showQpucImport ? (
+            <div className="stack">
+              <p className="muted">
+                Fournis à l'IA le prompt ci-dessous avec ton document de cours. Le JSON importé n'affichera pas les
+                indices dans l'éditeur : il ajoute simplement une compatibilité avec le mode Face-à-face.
+              </p>
+              <div className="row">
+                <button className="secondary-button" type="button" onClick={copyQpucPrompt}>
+                  {qpucPromptCopied ? "Prompt copié" : "Copier le prompt"}
+                </button>
+              </div>
+              <div
+                className="drop-zone"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const file = event.dataTransfer.files[0];
+                  if (file) void attachQpucJson(file);
+                }}
+              >
+                <p className="muted">Glisse le fichier JSON QPUC ici ou parcours ton système.</p>
+                <label className="button file-button">
+                  Parcourir
+                  <input
+                    accept="application/json,.json"
+                    type="file"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) void attachQpucJson(file);
+                    }}
+                  />
+                </label>
+              </div>
+              <textarea
+                value={qpucJson}
+                onChange={(event) => {
+                  setQpucJson(event.target.value);
+                  setQpucImportError(null);
+                }}
+                placeholder="Ou colle ici le JSON de compatibilité QPUC..."
+                rows={8}
+              />
+              {qpucImportError ? <p className="inline-error" role="alert">{qpucImportError}</p> : null}
+              <div className="row">
+                <button type="button" onClick={importQpucJson}>
+                  Importer les indices
+                </button>
+                <button className="secondary-button" type="button" onClick={() => setQpucJson("")}>
+                  Vider
+                </button>
+              </div>
+              {qpucImportMessage ? <p className="success-text">{qpucImportMessage}</p> : null}
+            </div>
+          ) : null}
+
+          {qpucQuestions.length > 0 ? (
+            <div className="metadata-panel row" style={{ justifyContent: "space-between" }}>
+              <p className="muted">
+                {qpucQuestions.length} question{qpucQuestions.length > 1 ? "s" : ""} à indices progressifs importée
+                {qpucQuestions.length > 1 ? "s" : ""}.
+              </p>
+              <button className="secondary-button" type="button" onClick={() => setQpucQuestions([])}>
+                Retirer la compatibilité
+              </button>
             </div>
           ) : null}
         </section>
@@ -938,6 +1162,17 @@ function toDraftQuestionFromDocumentJson(question: DocumentExtractedQuestion): D
   };
 }
 
+function toDraftQpucQuestion(question: QpucExtractedQuestion): DraftQpucQuestion {
+  return {
+    id: crypto.randomUUID(),
+    theme: question.theme,
+    answer: question.answer,
+    acceptedAnswers: question.acceptedAnswers,
+    clues: question.clues,
+    sourceReference: question.sourceReference
+  };
+}
+
 function validateQuestion(question: DraftQuestion): string | null {
   if (!question.prompt.trim()) {
     return "l'énoncé est requis.";
@@ -1108,6 +1343,17 @@ function toPayloadQuestion(question: DraftQuestion) {
             isCorrect: option.isCorrect,
             explanation: option.explanation.trim()
           }))
+  };
+}
+
+function toPayloadQpucQuestion(question: DraftQpucQuestion) {
+  return {
+    id: question.id,
+    theme: question.theme,
+    answer: question.answer,
+    acceptedAnswers: question.acceptedAnswers,
+    clues: question.clues,
+    sourceReference: question.sourceReference
   };
 }
 

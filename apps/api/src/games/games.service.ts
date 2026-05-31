@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
-import { GameEngine, GameModeRegistry, type GameQuiz } from "@quiz/game-core";
+import { GameEngine, GameModeRegistry, type GameQuiz, type GameSessionState } from "@quiz/game-core";
 import type {
   GameAnswerPayload,
   GameAnswerReceivedPayload,
@@ -12,6 +12,8 @@ import type {
   GameQuestionStartedPayload,
   StartGamePayload
 } from "@quiz/shared";
+import { getCompatibleGameModesForQuiz as getCompatibleModes } from "@quiz/shared";
+import { parseQpucProgressiveQuestions } from "@quiz/shared";
 import { LiveStateService } from "../live-state/live-state.service.js";
 import { PrismaService } from "../prisma/prisma.service.js";
 
@@ -47,10 +49,6 @@ export class GamesService {
       throw new NotFoundException("Room not found");
     }
 
-    if (room.players.length < 2) {
-      throw new BadRequestException("At least two players are required to start");
-    }
-
     const requestingPlayer = room.players.find((player) => player.socketId === socketId);
 
     if (!requestingPlayer || requestingPlayer.id !== room.hostPlayerId) {
@@ -58,6 +56,33 @@ export class GamesService {
     }
 
     const quiz = room.quiz && room.quiz.id === payload.quizId ? room.quiz : await this.loadQuiz(payload.quizId);
+    const compatibleModes = getCompatibleModes({
+      sourceType: quiz.sourceType,
+      qpucQuestions: quiz.qpucQuestions,
+      questionCount: quiz.questions.length,
+      questions: quiz.questions.map((question) => ({
+        type: this.toSharedQuestionType(question.type),
+        acceptedTextAnswers: question.acceptedTextAnswers
+      }))
+    });
+
+    if (!compatibleModes.includes(payload.modeId)) {
+      throw new BadRequestException("This quiz is not compatible with the selected game mode");
+    }
+
+    if (payload.modeId === "qpuc_face_to_face" && room.players.length !== 2) {
+      throw new BadRequestException("Le mode Face-à-face se joue exactement à 2 joueurs");
+    }
+
+    if (payload.modeId !== "qpuc_face_to_face" && room.players.length < 2) {
+      throw new BadRequestException("At least two players are required to start");
+    }
+
+    await this.prisma.player.updateMany({
+      where: { roomId: room.id },
+      data: { score: 0 }
+    });
+
     const session = await this.prisma.gameSession.create({
       data: {
         roomId: room.id,
@@ -74,10 +99,11 @@ export class GamesService {
       players: room.players.map((player) => ({
         id: player.id,
         displayName: player.displayName,
-        score: player.score,
+        score: 0,
         isHost: player.id === room.hostPlayerId
       })),
-      modeId: payload.modeId as GameModeId
+      modeId: payload.modeId as GameModeId,
+      timingMode: payload.timingMode ?? "dynamic_timer"
     });
 
     const question = await this.engine.start(session.id);
@@ -98,8 +124,9 @@ export class GamesService {
 
   async answer(
     payload: GameAnswerPayload,
-    socketId: string
-  ): Promise<{ receipt: GameAnswerReceivedPayload; shouldEndQuestion: boolean }> {
+    socketId: string,
+    answeredAt = new Date()
+  ): Promise<{ receipt: GameAnswerReceivedPayload; shouldEndQuestion: boolean; isCorrect: boolean }> {
     const room = await this.prisma.room.findUnique({
       where: { code: payload.roomCode.toUpperCase() },
       include: { players: true }
@@ -115,7 +142,24 @@ export class GamesService {
       throw new BadRequestException("Socket is not linked to a player in this room");
     }
 
-    const receipt = await this.engine.answer(payload, player.id);
+    const liveSessionBeforeAnswer = await this.liveState.get(payload.sessionId);
+    const receipt = await this.engine.answer(payload, player.id, answeredAt);
+
+    if (liveSessionBeforeAnswer?.modeId === "qpuc_face_to_face") {
+      const question = liveSessionBeforeAnswer.quiz.qpucQuestions?.[liveSessionBeforeAnswer.currentQuestionIndex];
+      const isCorrect = question ? this.matchesAcceptedText(payload.textAnswer, question.acceptedAnswers) : false;
+
+      return {
+        receipt: {
+          ...receipt,
+          textAnswer: payload.textAnswer?.trim() || undefined,
+          isCorrect
+        },
+        shouldEndQuestion: Boolean(payload.validated && isCorrect),
+        isCorrect
+      };
+    }
+
     const selectedOptions = await this.prisma.answerOption.findMany({
       where: {
         id: {
@@ -161,7 +205,8 @@ export class GamesService {
 
       return {
         receipt,
-        shouldEndQuestion: await this.engine.haveAllPlayersValidatedCurrentQuestion(payload.sessionId)
+        shouldEndQuestion: await this.engine.haveAllPlayersValidatedCurrentQuestion(payload.sessionId),
+        isCorrect: false
       };
     }
 
@@ -196,7 +241,8 @@ export class GamesService {
 
     return {
       receipt,
-      shouldEndQuestion: await this.engine.haveAllPlayersValidatedCurrentQuestion(payload.sessionId)
+      shouldEndQuestion: await this.engine.haveAllPlayersValidatedCurrentQuestion(payload.sessionId),
+      isCorrect
     };
   }
 
@@ -217,6 +263,10 @@ export class GamesService {
 
   nextQuestion(sessionId: string): Promise<GameQuestionStartedPayload | null> {
     return this.engine.nextQuestion(sessionId);
+  }
+
+  getLiveSession(sessionId: string): Promise<GameSessionState | null> {
+    return this.liveState.get(sessionId);
   }
 
   async finish(sessionId: string): Promise<GameFinishedPayload> {
@@ -261,17 +311,21 @@ export class GamesService {
   }
 
   private toGameQuiz(quiz: Awaited<ReturnType<GamesService["loadQuiz"]>>): GameQuiz {
+    const shuffledQuestions = this.shuffleArray(quiz.questions);
+    const shuffledQpucQuestions = this.shuffleArray(parseQpucProgressiveQuestions(quiz.qpucQuestions));
+
     return {
       id: quiz.id,
       title: quiz.title,
-      questions: quiz.questions.map((question) => ({
+      qpucQuestions: shuffledQpucQuestions,
+      questions: shuffledQuestions.map((question, questionIndex) => ({
         id: question.id,
         type: this.toSharedQuestionType(question.type),
         prompt: question.prompt,
         imageUrl: question.imageUrl ?? undefined,
         imageRegions: this.parseImageRegions(question.imageRegions),
         imageRegionExplanation: question.imageRegionExplanation ?? undefined,
-        order: question.order,
+        order: questionIndex + 1,
         durationMs: question.durationMs,
         acceptedTextAnswers: question.acceptedTextAnswers,
         options: question.answerOptions.map((option) => ({
@@ -282,6 +336,17 @@ export class GamesService {
         }))
       }))
     };
+  }
+
+  private shuffleArray<T>(items: T[]): T[] {
+    const shuffled = [...items];
+
+    for (let index = shuffled.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+    }
+
+    return shuffled;
   }
 
   private toSharedQuestionType(type: string) {

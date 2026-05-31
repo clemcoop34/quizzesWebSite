@@ -1,5 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Post } from "@nestjs/common";
-import type { ImageRegionDto, QuizReportReason } from "@quiz/shared";
+import type { ImageRegionDto, QpucProgressiveQuestionDto, QuizReportReason } from "@quiz/shared";
 import { QuizzesService } from "./quizzes.service.js";
 
 @Controller("quizzes")
@@ -55,7 +55,8 @@ export interface CreateQuizBody {
   sourceCity?: string;
   sourceYear?: string;
   trainingYear?: string;
-  questions: Array<{
+  qpucQuestions?: QpucProgressiveQuestionDto[];
+  questions?: Array<{
     type?: "multiple_choice" | "image_multiple_choice" | "image_region" | "open_text";
     prompt: string;
     imageUrl?: string;

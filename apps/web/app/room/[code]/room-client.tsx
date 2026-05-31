@@ -2,13 +2,18 @@
 
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { io, type Socket } from "socket.io-client";
+import { GAME_MODE_DEFINITIONS } from "@quiz/shared";
 import type {
   ClientToServerEvents,
   GameFinishedPayload,
+  GameBuzzStartedPayload,
+  GameModeId,
+  GameQuestionTimingMode,
   GameQuestionEndedPayload,
   GameQuestionStartedPayload,
   ImagePointDto,
   ImageRegionDto,
+  PlayerDto,
   RoomQuizPreviewDto,
   RoomStateDto,
   QuizReportReason,
@@ -41,7 +46,13 @@ export function RoomClient({ code }: { code: string }) {
   const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
   const [selectedPoint, setSelectedPoint] = useState<ImagePointDto | null>(null);
   const [textAnswer, setTextAnswer] = useState("");
+  const [qpucAnswerText, setQpucAnswerText] = useState("");
   const [answerValidated, setAnswerValidated] = useState(false);
+  const [timingMode, setTimingMode] = useState<GameQuestionTimingMode>("dynamic_timer");
+  const [selectedGameMode, setSelectedGameMode] = useState<GameModeId>("classic");
+  const [answerStatusByPlayerId, setAnswerStatusByPlayerId] = useState<
+    Record<string, { hasAnswer: boolean; validated: boolean }>
+  >({});
   const [explanationsSkipped, setExplanationsSkipped] = useState(false);
   const [liveScores, setLiveScores] = useState<Record<string, number>>({});
   const [likedQuizIds, setLikedQuizIds] = useState<string[]>([]);
@@ -57,19 +68,50 @@ export function RoomClient({ code }: { code: string }) {
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(null);
+  const [activeBuzz, setActiveBuzz] = useState<(GameBuzzStartedPayload & { pauseStartedAtMs: number }) | null>(null);
+  const [pausedDurationMs, setPausedDurationMs] = useState(0);
+  const [qpucHandOverride, setQpucHandOverride] = useState<{ segmentIndex: number; playerId: string } | null>(null);
+  const [qpucAttemptsByPlayerId, setQpucAttemptsByPlayerId] = useState<
+    Record<string, { text: string; isCorrect?: boolean }>
+  >({});
+  const [qpucAwardByPlayerId, setQpucAwardByPlayerId] = useState<Record<string, number>>({});
+  const [qpucCorrectStreak, setQpucCorrectStreak] = useState<{ playerId: string; count: number } | null>(null);
   const socketRef = useRef<QuizSocket | null>(null);
   const questionPanelRef = useRef<HTMLElement | null>(null);
   const explanationPanelRef = useRef<HTMLDivElement | null>(null);
+  const liveScoresRef = useRef<Record<string, number>>({});
+  const hasReceivedInitialRoomStateRef = useRef(false);
 
   useEffect(() => {
     const instance: QuizSocket = io(socketUrl, { autoConnect: true });
     socketRef.current = instance;
     instance.on("room:state_updated", (payload) => {
       setIsJoining(false);
+      const isInitialRoomState = !hasReceivedInitialRoomStateRef.current;
+      hasReceivedInitialRoomStateRef.current = true;
+
+      if (isInitialRoomState && !payload.currentPlayerId) {
+        setCurrentPlayerId(null);
+        window.sessionStorage.removeItem(playerStorageKey(code));
+      }
+
       setRoom((previous) => ({
         ...payload,
-        currentPlayerId: payload.currentPlayerId ?? previous?.currentPlayerId
+        currentPlayerId: payload.currentPlayerId ?? (isInitialRoomState ? undefined : previous?.currentPlayerId)
       }));
+
+      if (payload.status === "lobby") {
+        setQuestion(null);
+        setEnded(null);
+        setFinished(null);
+        setActiveBuzz(null);
+        setQpucAttemptsByPlayerId({});
+        setQpucAwardByPlayerId({});
+        setQpucCorrectStreak(null);
+        const resetScores = Object.fromEntries(payload.players.map((player) => [player.id, player.score]));
+        liveScoresRef.current = resetScores;
+        setLiveScores(resetScores);
+      }
 
       if (payload.currentPlayerId) {
         setCurrentPlayerId(payload.currentPlayerId);
@@ -82,17 +124,93 @@ export function RoomClient({ code }: { code: string }) {
       setSelectedOptionIds([]);
       setSelectedPoint(null);
       setTextAnswer("");
+      setQpucAnswerText("");
       setAnswerValidated(false);
+      setAnswerStatusByPlayerId({});
+      setActiveBuzz(null);
+      setPausedDurationMs(0);
+      setQpucHandOverride(null);
+      setQpucAttemptsByPlayerId({});
+      setQpucAwardByPlayerId({});
       setExplanationsSkipped(false);
       setFinished(null);
     });
+    instance.on("game:buzz_started", (payload) => {
+      setQpucAnswerText("");
+      setActiveBuzz({ ...payload, pauseStartedAtMs: Date.now() });
+    });
+    instance.on("game:buzz_ended", (payload) => {
+      setActiveBuzz((previous) => {
+        if (previous && previous.sessionId === payload.sessionId && previous.questionId === payload.questionId) {
+          setPausedDurationMs((duration) => duration + Math.max(0, Date.now() - previous.pauseStartedAtMs));
+        }
+
+        return null;
+      });
+      setQpucAnswerText("");
+
+      if (payload.endsAt) {
+        setQuestion((previous) =>
+          previous && previous.sessionId === payload.sessionId
+            ? {
+                ...previous,
+                endsAt: payload.endsAt
+              }
+            : previous
+        );
+      }
+
+      if (payload.handPlayerId && payload.segmentIndex !== undefined) {
+        setQpucHandOverride({
+          segmentIndex: payload.segmentIndex,
+          playerId: payload.handPlayerId
+        });
+      }
+    });
+    instance.on("game:answer_received", (payload) => {
+      setAnswerStatusByPlayerId((previous) => ({
+        ...previous,
+        [payload.playerId]: {
+          hasAnswer: payload.hasAnswer,
+          validated: payload.validated
+        }
+      }));
+      if (payload.textAnswer) {
+        setQpucAttemptsByPlayerId((previous) => ({
+          ...previous,
+          [payload.playerId]: {
+            text: payload.textAnswer ?? "",
+            isCorrect: payload.isCorrect
+          }
+        }));
+      }
+    });
     instance.on("game:question_ended", (payload) => {
       setEnded(payload);
+      setActiveBuzz(null);
+      setQpucAnswerText("");
+      setQpucHandOverride(null);
       setExplanationsSkipped(false);
+      const scoringResult = payload.playerResults.find((result) => result.status === "perfect");
+      setQpucCorrectStreak((previous) =>
+        scoringResult
+          ? {
+              playerId: scoringResult.playerId,
+              count: previous?.playerId === scoringResult.playerId ? previous.count + 1 : 1
+            }
+          : null
+      );
+      const previousScores = liveScoresRef.current;
+      const scoreDeltas = Object.fromEntries(
+        Object.entries(payload.scores).map(([playerId, score]) => [playerId, score - (previousScores[playerId] ?? 0)])
+      );
+      setQpucAwardByPlayerId(scoreDeltas);
+      liveScoresRef.current = payload.scores;
       setLiveScores(payload.scores);
     });
     instance.on("game:finished", (payload) => {
       setFinished(payload);
+      liveScoresRef.current = payload.scores;
       setLiveScores(payload.scores);
     });
     instance.on("error", (payload) => setError(payload.message));
@@ -154,9 +272,24 @@ export function RoomClient({ code }: { code: string }) {
   const isHost = Boolean(currentPlayer?.isHost);
   const isOpenTextQuestion = question?.question.type === "open_text";
   const isImageRegionQuestion = question?.question.type === "image_region";
+  const isQpucQuestion = Boolean(question?.question.clues?.length);
   const questionOptionLabels = new Map(question?.question.options.map((option) => [option.id, option.label]) ?? []);
   const explanationsByOptionId = new Map(ended?.explanations.map((item) => [item.optionId, item.explanation]) ?? []);
   const playerResultById = new Map(ended?.playerResults.map((result) => [result.playerId, result.status]) ?? []);
+  useEffect(() => {
+    if (!quizPreview || quizPreview.compatibleGameModes.includes(selectedGameMode)) {
+      return;
+    }
+
+    setSelectedGameMode(quizPreview.compatibleGameModes[0] ?? "classic");
+  }, [quizPreview, selectedGameMode]);
+
+  useEffect(() => {
+    if (selectedGameMode === "qpuc_face_to_face") {
+      setTimingMode("dynamic_timer");
+    }
+  }, [selectedGameMode]);
+
   const rankedPlayers = useMemo(
     () =>
       [...(room?.players ?? [])].sort(
@@ -190,9 +323,42 @@ export function RoomClient({ code }: { code: string }) {
       return tokens.every((token) => searchableText.includes(token));
     });
   }, [quizOptions, quizPickerSearch]);
-  const remainingRatio = question
-    ? Math.max(0, Math.min(1, (Date.parse(question.endsAt) - now) / (Date.parse(question.endsAt) - Date.parse(question.startedAt))))
+  const isNoTimerQuestion = question?.timingMode === "no_timer";
+  const effectiveNow = activeBuzz ? activeBuzz.pauseStartedAtMs : now;
+  const remainingMs = question?.endsAt ? Math.max(0, Date.parse(question.endsAt) - effectiveNow) : null;
+  const remainingRatio = question?.endsAt
+    ? Math.max(
+        0,
+        Math.min(
+          1,
+          (Date.parse(question.endsAt) - effectiveNow) / (Date.parse(question.endsAt) - Date.parse(question.startedAt))
+        )
+      )
     : 0;
+  const qpucElapsedMs =
+    question && isQpucQuestion ? Math.max(0, effectiveNow - Date.parse(question.startedAt) - pausedDurationMs) : 0;
+  const qpucDurationMs = question?.question.durationMs ?? 1;
+  const qpucElapsedRatio = Math.max(0, Math.min(1, qpucElapsedMs / qpucDurationMs));
+  const qpucSegmentIndex = Math.min(3, Math.max(0, Math.floor(qpucElapsedRatio * 4)));
+  const visibleQpucClueCount = question?.question.clues ? visibleClueCount(question.question.clues, qpucElapsedRatio) : 0;
+  const visibleQpucClues =
+    question?.question.clues && visibleQpucClueCount > 0 ? [question.question.clues[visibleQpucClueCount - 1]] : [];
+  const qpucPointsAvailable = pointsForQpucElapsedRatio(qpucElapsedRatio);
+  const leftQpucPlayer = room?.players.find((player) => player.isHost) ?? room?.players[0];
+  const rightQpucPlayer = room?.players.find((player) => player.id !== leftQpucPlayer?.id);
+  const qpucBaseHandPlayerId = question?.handPlayerId ?? leftQpucPlayer?.id;
+  const qpucNaturalHandPlayerId =
+    qpucSegmentIndex % 2 === 0 ? qpucBaseHandPlayerId : getOpposingPlayerId(room?.players ?? [], qpucBaseHandPlayerId);
+  const qpucCurrentHandPlayerId =
+    qpucHandOverride?.segmentIndex === qpucSegmentIndex ? qpucHandOverride.playerId : qpucNaturalHandPlayerId;
+  const activeBuzzIsMine = activeBuzz?.playerId === currentPlayerId;
+  const buzzAnswerRemainingSeconds = activeBuzz ? Math.ceil(Math.max(0, Date.parse(activeBuzz.answerEndsAt) - now) / 1000) : 0;
+  const qpucScoringResult =
+    ended && isQpucQuestion ? ended.playerResults.find((result) => result.status === "perfect") : undefined;
+  const qpucScoringPlayer = room?.players.find((player) => player.id === qpucScoringResult?.playerId);
+  const qpucScoringPoints = qpucScoringResult ? qpucAwardByPlayerId[qpucScoringResult.playerId] ?? 0 : 0;
+  const qpucScoringStreakCount =
+    qpucScoringResult && qpucCorrectStreak?.playerId === qpucScoringResult.playerId ? qpucCorrectStreak.count : 1;
 
   function joinRoom() {
     if (isJoined || isJoining) return;
@@ -215,7 +381,14 @@ export function RoomClient({ code }: { code: string }) {
     socketRef.current?.emit("game:start", {
       roomCode: code,
       quizId: room.quizId,
-      modeId: "classic"
+      modeId: selectedGameMode,
+      timingMode
+    });
+  }
+
+  function returnToLobby() {
+    socketRef.current?.emit("room:return_to_lobby", {
+      code
     });
   }
 
@@ -247,6 +420,29 @@ export function RoomClient({ code }: { code: string }) {
     setTextAnswer(value);
     setAnswerValidated(false);
     sendAnswer([], value, false, null);
+  }
+
+  function buzz() {
+    if (!question || !isJoined || ended || activeBuzz || !isQpucQuestion) return;
+
+    socketRef.current?.emit("game:buzz", {
+      sessionId: question.sessionId,
+      roomCode: code,
+      questionId: question.question.id
+    });
+  }
+
+  function submitQpucAnswer() {
+    if (!question || !isQpucQuestion || !activeBuzzIsMine || !qpucAnswerText.trim()) return;
+
+    socketRef.current?.emit("game:answer", {
+      sessionId: question.sessionId,
+      roomCode: code,
+      questionId: question.question.id,
+      optionIds: [],
+      textAnswer: qpucAnswerText,
+      validated: true
+    });
   }
 
   function updateAnswerValidated(value: boolean) {
@@ -351,12 +547,26 @@ export function RoomClient({ code }: { code: string }) {
         <aside className="player-rail" aria-label="Classement live">
           {rankedPlayers.map((player, index) => {
             const resultStatus = playerResultById.get(player.id);
+            const answerStatus = answerStatusByPlayerId[player.id];
+            const bubbleClass = resultStatus
+              ? `player-bubble player-bubble-${resultStatus}`
+              : answerStatus?.validated
+                ? "player-bubble player-bubble-ready"
+                : answerStatus?.hasAnswer
+                  ? "player-bubble player-bubble-answered"
+                  : "player-bubble";
 
             return (
               <div
-                className={resultStatus ? `player-bubble player-bubble-${resultStatus}` : "player-bubble"}
+                className={bubbleClass}
                 key={`${player.id}-${ended?.questionId ?? "playing"}`}
-                title={`${index + 1}. ${player.displayName}`}
+                title={`${index + 1}. ${player.displayName}${
+                  answerStatus?.validated
+                    ? " · réponse validée"
+                    : answerStatus?.hasAnswer
+                      ? " · réponse en cours"
+                      : " · pas encore répondu"
+                }`}
               >
                 <span>{player.displayName.trim().charAt(0).toUpperCase() || "?"}</span>
                 <small>{liveScores[player.id] ?? player.score}</small>
@@ -391,12 +601,47 @@ export function RoomClient({ code }: { code: string }) {
           ) : (
             <span className="muted">Connecté : {currentPlayer?.displayName}</span>
           )}
-          {isHost ? (
+          {isHost && room?.status === "lobby" && !question && !finished ? (
             <button type="button" disabled={!room?.quizId} onClick={startGame}>
               Lancer
             </button>
           ) : null}
         </div>
+
+        {isHost && room?.status === "lobby" && quizPreview ? (
+          <div className="timing-options room-setup-options" aria-label="Réglages de partie">
+            <button
+              aria-pressed={timingMode === "no_timer"}
+              className={timingMode === "no_timer" ? "timing-option timing-option-active" : "timing-option"}
+              disabled={selectedGameMode === "qpuc_face_to_face"}
+              type="button"
+              onClick={() => {
+                if (selectedGameMode !== "qpuc_face_to_face") {
+                  setTimingMode((current) => (current === "no_timer" ? "dynamic_timer" : "no_timer"));
+                }
+              }}
+            >
+              {selectedGameMode === "qpuc_face_to_face"
+                ? "Sans chrono indisponible"
+                : timingMode === "no_timer"
+                  ? "Sans chrono activé"
+                  : "Sans chrono"}
+            </button>
+            {quizPreview.compatibleGameModes.map((modeId) => (
+              <button
+                aria-pressed={selectedGameMode === modeId}
+                className={selectedGameMode === modeId ? "timing-option timing-option-active" : "timing-option"}
+                disabled={quizPreview.compatibleGameModes.length === 1}
+                key={modeId}
+                type="button"
+                onClick={() => setSelectedGameMode(modeId)}
+                title={GAME_MODE_DEFINITIONS[modeId].description}
+              >
+                {GAME_MODE_DEFINITIONS[modeId].shortLabel}
+              </button>
+            ))}
+          </div>
+        ) : null}
 
         {error ? <p role="alert">{error}</p> : null}
       </section>
@@ -430,6 +675,11 @@ export function RoomClient({ code }: { code: string }) {
                 {quizPreview.correctionPercent && quizPreview.correctionPercent > 5 ? (
                   <span className="compact-pill compact-pill-accent">Corrigé {quizPreview.correctionPercent}%</span>
                 ) : null}
+                {quizPreview.compatibleGameModes.map((modeId) => (
+                  <span className="compact-pill compact-pill-mode" key={modeId}>
+                    {GAME_MODE_DEFINITIONS[modeId].shortLabel}
+                  </span>
+                ))}
                 {quizPreview.sourceType === "uness" ? <span className="compact-pill">UNESS</span> : null}
                 {quizPreview.sourceCity ? <span className="compact-pill">{quizPreview.sourceCity}</span> : null}
                 {quizPreview.sourceYear ? <span className="compact-pill">{quizPreview.sourceYear}</span> : null}
@@ -476,12 +726,43 @@ export function RoomClient({ code }: { code: string }) {
             <p className="muted">
               Question {question.questionIndex + 1} / {question.totalQuestions}
             </p>
-            <p className="muted">{Math.ceil(Math.max(0, Date.parse(question.endsAt) - now) / 1000)}s</p>
+            <p className="muted">{isNoTimerQuestion ? "Sans chrono" : `${Math.ceil((remainingMs ?? 0) / 1000)}s`}</p>
           </div>
-          <div className="timer-track" aria-hidden="true">
-            <div className="timer-fill" style={{ width: `${remainingRatio * 100}%` }} />
-          </div>
-          <h2>{question.question.prompt}</h2>
+          {isQpucQuestion ? (
+            <QpucFaceToFaceStage
+              activeBuzzPlayerName={
+                activeBuzz ? room?.players.find((player) => player.id === activeBuzz.playerId)?.displayName : undefined
+              }
+              baseHandPlayerId={qpucBaseHandPlayerId}
+              buzzAnswerRemainingSeconds={buzzAnswerRemainingSeconds}
+              buzzDisabled={!isJoined || Boolean(ended) || Boolean(activeBuzz) || currentPlayerId !== qpucCurrentHandPlayerId}
+              correctAnswer={ended?.questionExplanation}
+              currentHandPlayerId={qpucCurrentHandPlayerId}
+              currentSegmentIndex={qpucSegmentIndex}
+              isAnswering={Boolean(activeBuzzIsMine)}
+              leftPlayer={leftQpucPlayer}
+              attemptsByPlayerId={qpucAttemptsByPlayerId}
+              pointsAvailable={qpucPointsAvailable}
+              questionPrompt={question.question.prompt}
+              answerText={qpucAnswerText}
+              clues={visibleQpucClues}
+              progressRatio={qpucElapsedRatio}
+              rightPlayer={rightQpucPlayer}
+              scoringPlayerName={qpucScoringPlayer?.displayName}
+              scoringPoints={qpucScoringPoints}
+              scoringStreakCount={qpucScoringStreakCount}
+              onBuzz={buzz}
+              onSubmitAnswer={submitQpucAnswer}
+              onAnswerTextChange={setQpucAnswerText}
+            />
+          ) : isNoTimerQuestion ? (
+            <div className="no-timer-track">La question passera quand tous les joueurs auront validé.</div>
+          ) : (
+            <div className="timer-track" aria-hidden="true">
+              <div className="timer-fill" style={{ width: `${remainingRatio * 100}%` }} />
+            </div>
+          )}
+          {!isQpucQuestion ? <h2>{question.question.prompt}</h2> : null}
           {question.question.imageUrl && !isImageRegionQuestion ? (
             <img className="question-image" src={question.question.imageUrl} alt="" />
           ) : null}
@@ -494,7 +775,7 @@ export function RoomClient({ code }: { code: string }) {
               showCorrectRegions={Boolean(ended)}
               onSelect={selectImagePoint}
             />
-          ) : isOpenTextQuestion ? (
+          ) : isQpucQuestion ? null : isOpenTextQuestion ? (
             <input
               disabled={Boolean(ended) || !isJoined}
               placeholder="Ta réponse"
@@ -519,7 +800,7 @@ export function RoomClient({ code }: { code: string }) {
               ))}
             </div>
           )}
-          {!ended ? (
+          {!ended && !isQpucQuestion ? (
             <button
               aria-pressed={answerValidated}
               className={answerValidated ? "commit-answer-button commit-answer-button-active" : "commit-answer-button"}
@@ -527,13 +808,15 @@ export function RoomClient({ code }: { code: string }) {
               type="button"
               onClick={() => updateAnswerValidated(!answerValidated)}
             >
-              {answerValidated ? "Réponse validée" : "Valider ma réponse"}
+              {answerValidated ? "Réponse validée" : isNoTimerQuestion ? "Valider et attendre les autres" : "Valider ma réponse"}
             </button>
           ) : null}
           {ended ? (
             <div className="explanation-panel stack" ref={explanationPanelRef}>
               {isImageRegionQuestion ? (
                 ended.questionExplanation ? <p className="muted">{ended.questionExplanation}</p> : null
+              ) : isQpucQuestion ? (
+                <p className="muted">Question terminée.</p>
               ) : (
                 <p className="muted">
                   Bonne réponse :{" "}
@@ -547,7 +830,11 @@ export function RoomClient({ code }: { code: string }) {
                   type="button"
                   onClick={skipExplanations}
                 >
-                  {explanationsSkipped ? "Passage en cours..." : "Passer les explications"}
+                  {explanationsSkipped
+                    ? "Passage en cours..."
+                    : isQpucQuestion
+                      ? "Passer à la question suivante"
+                      : "Passer les explications"}
                 </button>
               ) : (
                 <p className="muted">En attente du créateur de la room pour passer à la suite.</p>
@@ -582,6 +869,13 @@ export function RoomClient({ code }: { code: string }) {
               </button>
             </div>
           ) : null}
+          {isHost ? (
+            <button className="commit-answer-button" type="button" onClick={returnToLobby}>
+              Retour à la room
+            </button>
+          ) : (
+            <p className="muted">En attente du créateur pour revenir à la room.</p>
+          )}
         </section>
       ) : null}
       {showReportModal ? (
@@ -742,12 +1036,273 @@ function ImageRegionPlayer({
   );
 }
 
+function QpucFaceToFaceStage({
+  activeBuzzPlayerName,
+  answerText,
+  attemptsByPlayerId,
+  baseHandPlayerId,
+  buzzAnswerRemainingSeconds,
+  buzzDisabled,
+  clues,
+  correctAnswer,
+  currentHandPlayerId,
+  currentSegmentIndex,
+  isAnswering,
+  leftPlayer,
+  pointsAvailable,
+  progressRatio,
+  questionPrompt,
+  rightPlayer,
+  scoringPlayerName,
+  scoringPoints,
+  scoringStreakCount,
+  onAnswerTextChange,
+  onBuzz,
+  onSubmitAnswer
+}: {
+  activeBuzzPlayerName?: string;
+  answerText: string;
+  attemptsByPlayerId: Record<string, { text: string; isCorrect?: boolean }>;
+  baseHandPlayerId?: string;
+  buzzAnswerRemainingSeconds: number;
+  buzzDisabled: boolean;
+  clues: string[];
+  correctAnswer?: string;
+  currentHandPlayerId?: string;
+  currentSegmentIndex: number;
+  isAnswering: boolean;
+  leftPlayer?: PlayerDto;
+  pointsAvailable: 1 | 2 | 3 | 4;
+  progressRatio: number;
+  questionPrompt: string;
+  rightPlayer?: PlayerDto;
+  scoringPlayerName?: string;
+  scoringPoints: number;
+  scoringStreakCount: number;
+  onAnswerTextChange: (value: string) => void;
+  onBuzz: () => void;
+  onSubmitAnswer: () => void;
+}) {
+  const activeHandPlayerName =
+    [leftPlayer, rightPlayer].find((player) => player?.id === currentHandPlayerId)?.displayName ?? "l'autre joueur";
+  const segmentPoints = [4, 3, 2, 1] as const;
+  const currentClue = clues[clues.length - 1];
+  const hasStreakReaction = Boolean(correctAnswer && scoringPlayerName && scoringStreakCount >= 2);
+  const presenterSpeech =
+    hasStreakReaction
+      ? `Mais, mais, c'est encore la bonne réponse ! Décidément ${scoringPlayerName} est en forme et remporte ${scoringPoints} point${
+          scoringPoints > 1 ? "s" : ""
+        }.`
+      : correctAnswer && scoringPlayerName
+      ? `${correctAnswer} est la bonne réponse ! ${scoringPlayerName} remporte ${scoringPoints} point${
+          scoringPoints > 1 ? "s" : ""
+        }.`
+      : correctAnswer
+        ? `Temps écoulé. La réponse attendue était : ${correctAnswer}.`
+        : currentClue ?? "Je prépare le prochain indice...";
+  const presenterImage = hasStreakReaction
+    ? "/samuel-etienne-stupefait.png"
+    : correctAnswer && scoringPlayerName
+      ? "/samuel-etienne-bravo.png"
+      : "/samuel-etienne-qpuc.png";
+
+  return (
+    <section className="qpuc-stage">
+      <div className="qpuc-presenter-area">
+        <p className="muted">{questionPrompt}</p>
+        <div className="qpuc-presenter">
+          <img src={presenterImage} alt="" />
+          <p className={correctAnswer ? "qpuc-clue-bubble qpuc-clue-bubble-answer" : "qpuc-clue-bubble"}>
+            {presenterSpeech}
+          </p>
+        </div>
+      </div>
+
+      <div className="qpuc-play-row">
+        <div className="qpuc-gauge-board" aria-label={`Points disponibles : ${pointsAvailable}`}>
+          <PlayerHandToken
+            player={leftPlayer}
+            active={currentHandPlayerId === leftPlayer?.id}
+            attempt={leftPlayer ? attemptsByPlayerId[leftPlayer.id] : undefined}
+            side="left"
+          />
+          <div className="qpuc-gauge">
+            {segmentPoints.map((points, index) => {
+              const segmentHandPlayerId = segmentHandForIndex(
+                index,
+                baseHandPlayerId,
+                leftPlayer,
+                rightPlayer,
+                currentSegmentIndex,
+                currentHandPlayerId
+              );
+              const side = segmentHandPlayerId === leftPlayer?.id ? "left" : "right";
+              const fillRatio = fillRatioForQpucSegment(index, progressRatio);
+              const className = [
+                "qpuc-gauge-cell",
+                `qpuc-gauge-cell-${side}`,
+                index === currentSegmentIndex ? "qpuc-gauge-cell-active" : ""
+              ]
+                .filter(Boolean)
+                .join(" ");
+
+              return (
+                <span className={className} key={points}>
+                  <span className="qpuc-gauge-fill" style={{ height: `${fillRatio * 100}%` }} />
+                  <span className="qpuc-gauge-number">{points}</span>
+                </span>
+              );
+            })}
+          </div>
+          <PlayerHandToken
+            player={rightPlayer}
+            active={currentHandPlayerId === rightPlayer?.id}
+            attempt={rightPlayer ? attemptsByPlayerId[rightPlayer.id] : undefined}
+            side="right"
+          />
+        </div>
+
+        <div className="qpuc-buzzer-zone">
+          <button className="qpuc-buzzer" disabled={buzzDisabled} type="button" onClick={onBuzz}>
+            BUZZ
+          </button>
+          {activeBuzzPlayerName ? (
+            <p className="muted">
+              {isAnswering
+                ? `Tu as ${buzzAnswerRemainingSeconds}s pour répondre.`
+                : `${activeBuzzPlayerName} répond...`}
+            </p>
+          ) : (
+            <p className="muted">
+              {correctAnswer
+                ? "Question terminée."
+                : buzzDisabled
+                  ? `La main est à ${activeHandPlayerName}.`
+                  : "Tu as la main : buzz quand tu penses avoir la réponse."}
+            </p>
+          )}
+          {isAnswering ? (
+            <form
+              className="qpuc-answer-popover"
+              onSubmit={(event) => {
+                event.preventDefault();
+                onSubmitAnswer();
+              }}
+            >
+              <input
+                autoFocus
+                placeholder="Ta réponse"
+                value={answerText}
+                onChange={(event) => onAnswerTextChange(event.target.value)}
+              />
+              <button type="submit" disabled={!answerText.trim()}>
+                Répondre
+              </button>
+            </form>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function PlayerHandToken({
+  active,
+  attempt,
+  player,
+  side
+}: {
+  active: boolean;
+  attempt?: { text: string; isCorrect?: boolean };
+  player?: PlayerDto;
+  side: "left" | "right";
+}) {
+  return (
+    <div className={active ? "qpuc-player-token qpuc-player-token-active" : "qpuc-player-token"} data-side={side}>
+      <span>{player?.displayName.trim().charAt(0).toUpperCase() || "?"}</span>
+      <small>{player?.displayName ?? "Joueur"}</small>
+      {attempt?.text ? (
+        <em className={attempt.isCorrect ? "qpuc-attempt-bubble qpuc-attempt-bubble-correct" : "qpuc-attempt-bubble"}>
+          {attempt.text} ?
+        </em>
+      ) : null}
+    </div>
+  );
+}
+
+function segmentHandForIndex(
+  index: number,
+  baseHandPlayerId: string | undefined,
+  leftPlayer: PlayerDto | undefined,
+  rightPlayer: PlayerDto | undefined,
+  currentSegmentIndex: number,
+  currentHandPlayerId: string | undefined
+): string | undefined {
+  if (index === currentSegmentIndex && currentHandPlayerId) {
+    return currentHandPlayerId;
+  }
+
+  const basePlayerId = baseHandPlayerId ?? leftPlayer?.id;
+  const oppositePlayerId = basePlayerId === leftPlayer?.id ? rightPlayer?.id : leftPlayer?.id;
+
+  return index % 2 === 0 ? basePlayerId : oppositePlayerId;
+}
+
+function fillRatioForQpucSegment(index: number, progressRatio: number): number {
+  const segmentStart = index / 4;
+  const segmentEnd = (index + 1) / 4;
+
+  if (progressRatio <= segmentStart) {
+    return 1;
+  }
+
+  if (progressRatio >= segmentEnd) {
+    return 0;
+  }
+
+  return 1 - (progressRatio - segmentStart) * 4;
+}
+
+function getOpposingPlayerId(players: PlayerDto[], playerId: string | undefined): string | undefined {
+  return players.find((player) => player.id !== playerId)?.id ?? playerId;
+}
+
 function toSvgPoints(points: ImagePointDto[]): string {
   return points.map((point) => `${point.x * 100},${point.y * 100}`).join(" ");
 }
 
 function clamp(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+function visibleClueCount(clues: string[], elapsedRatio: number): number {
+  if (clues.length === 0) {
+    return 0;
+  }
+
+  const wordCounts = clues.map((clue) => Math.max(1, clue.trim().split(/\s+/).filter(Boolean).length));
+  const totalWords = wordCounts.reduce((total, count) => total + count, 0);
+  let previousWords = 0;
+  let visible = 0;
+
+  for (let index = 0; index < clues.length; index += 1) {
+    const revealRatio = (previousWords / totalWords) * 0.9;
+
+    if (elapsedRatio >= revealRatio) {
+      visible = index + 1;
+    }
+
+    previousWords += wordCounts[index];
+  }
+
+  return visible;
+}
+
+function pointsForQpucElapsedRatio(elapsedRatio: number): 1 | 2 | 3 | 4 {
+  if (elapsedRatio <= 0.25) return 4;
+  if (elapsedRatio <= 0.5) return 3;
+  if (elapsedRatio <= 0.75) return 2;
+  return 1;
 }
 
 function playerStorageKey(code: string) {

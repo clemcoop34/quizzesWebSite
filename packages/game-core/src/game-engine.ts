@@ -46,6 +46,8 @@ export class GameEngine {
     const state = await this.mustGetState(payload.sessionId);
     const mode = this.registry.get(state.modeId);
     const nextState = mode.acceptAnswer(state, payload, playerId, now);
+    const questionAnswers = nextState.answersByQuestion[payload.questionId] ?? {};
+    const playerAnswer = questionAnswers[playerId];
 
     await this.store.set(payload.sessionId, nextState);
 
@@ -53,7 +55,9 @@ export class GameEngine {
       sessionId: payload.sessionId,
       questionId: payload.questionId,
       playerId,
-      receivedAt: now.toISOString()
+      receivedAt: now.toISOString(),
+      hasAnswer: playerAnswer ? this.hasAnswerContent(playerAnswer) : false,
+      validated: Boolean(playerAnswer?.validated)
     };
   }
 
@@ -121,5 +125,9 @@ export class GameEngine {
     }
 
     return state;
+  }
+
+  private hasAnswerContent(answer: { optionIds: Id[]; textAnswer?: string; selectedPoint?: unknown }): boolean {
+    return answer.optionIds.length > 0 || Boolean(answer.textAnswer?.trim()) || Boolean(answer.selectedPoint);
   }
 }

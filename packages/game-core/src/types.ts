@@ -2,12 +2,14 @@ import type {
   GameAnswerPayload,
   GameFinishedPayload,
   GameModeId,
+  GameQuestionTimingMode,
   GameQuestionEndedPayload,
   GameQuestionStartedPayload,
   Id,
   ImagePointDto,
   ImageRegionDto,
   PlayerDto,
+  QpucProgressiveQuestionDto,
   QuestionDto
 } from "@quiz/shared";
 
@@ -29,6 +31,7 @@ export interface GameQuiz {
   id: Id;
   title: string;
   questions: GameQuestion[];
+  qpucQuestions?: QpucProgressiveQuestionDto[];
 }
 
 export interface PlayerAnswerState {
@@ -51,9 +54,11 @@ export interface GameSessionState {
   currentQuestionIndex: number;
   questionStartedAt?: string;
   questionDurationMs: number;
+  questionTimingMode: GameQuestionTimingMode;
   answersByQuestion: Record<Id, Record<Id, PlayerAnswerState>>;
   scoredQuestionIds: Id[];
   scores: Record<Id, number>;
+  qpucBaseHandPlayerId?: Id;
 }
 
 export interface InitializeGameInput {
@@ -63,6 +68,7 @@ export interface InitializeGameInput {
   players: PlayerDto[];
   modeId: GameModeId;
   questionDurationMs?: number;
+  timingMode?: GameQuestionTimingMode;
 }
 
 export interface GameStateStore {

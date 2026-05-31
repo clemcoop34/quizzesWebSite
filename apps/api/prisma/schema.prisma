@@ -56,6 +56,7 @@ model Quiz {
   sourceCity  String?
   sourceYear  String?
   trainingYear String?
+  qpucQuestions Json       @default("[]")
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 

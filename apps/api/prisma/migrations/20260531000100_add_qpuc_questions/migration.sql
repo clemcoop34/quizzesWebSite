@@ -1,0 +1,1 @@
+ALTER TABLE "Quiz" ADD COLUMN "qpucQuestions" JSONB NOT NULL DEFAULT '[]';

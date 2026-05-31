@@ -8,8 +8,8 @@ import type {
   ImageRegionDto
 } from "@quiz/shared";
 import type { GameMode, GameSessionState, InitializeGameInput } from "../types.js";
+import { calculateClassicQuestionDurationMs, CLASSIC_TIMING_CONFIG } from "../timing.js";
 
-const DEFAULT_QUESTION_DURATION_MS = 20_000;
 const CORRECT_ANSWER_POINTS = 1_000;
 const MAX_SPEED_BONUS_POINTS = 500;
 type AnswerGrade = {
@@ -32,7 +32,8 @@ export class ClassicMode implements GameMode {
       modeId: this.id,
       status: "initialized",
       currentQuestionIndex: 0,
-      questionDurationMs: input.questionDurationMs ?? DEFAULT_QUESTION_DURATION_MS,
+      questionDurationMs: input.questionDurationMs ?? CLASSIC_TIMING_CONFIG.fallbackQuestionDurationMs,
+      questionTimingMode: input.timingMode ?? "dynamic_timer",
       answersByQuestion: {},
       scoredQuestionIds: [],
       scores
@@ -41,8 +42,8 @@ export class ClassicMode implements GameMode {
 
   buildQuestionStartedPayload(state: GameSessionState, now: Date): GameQuestionStartedPayload {
     const question = this.currentQuestion(state);
-    const durationMs = question.durationMs || state.questionDurationMs;
-    const endsAt = new Date(now.getTime() + durationMs);
+    const durationMs = this.durationForQuestion(state);
+    const endsAt = durationMs ? new Date(now.getTime() + durationMs) : undefined;
 
     return {
       sessionId: state.sessionId,
@@ -53,13 +54,14 @@ export class ClassicMode implements GameMode {
         prompt: question.prompt,
         imageUrl: question.imageUrl,
         order: question.order,
-        durationMs: question.durationMs,
+        durationMs: durationMs ?? question.durationMs,
         options: question.options.map(({ id, label }) => ({ id, label }))
       },
       questionIndex: state.currentQuestionIndex,
       totalQuestions: state.quiz.questions.length,
       startedAt: now.toISOString(),
-      endsAt: endsAt.toISOString()
+      endsAt: endsAt?.toISOString(),
+      timingMode: state.questionTimingMode
     };
   }
 
@@ -197,6 +199,14 @@ export class ClassicMode implements GameMode {
 
   private isLastQuestion(state: GameSessionState): boolean {
     return state.currentQuestionIndex >= state.quiz.questions.length - 1;
+  }
+
+  private durationForQuestion(state: GameSessionState): number | null {
+    if (state.questionTimingMode === "no_timer") {
+      return null;
+    }
+
+    return calculateClassicQuestionDurationMs(this.currentQuestion(state));
   }
 
   private correctOptionIds(questionId: Id, state: GameSessionState): Id[] {
@@ -351,7 +361,13 @@ export class ClassicMode implements GameMode {
     const startedAtMs = Date.parse(state.questionStartedAt);
     const answeredAtMs = Date.parse(answeredAt);
     const elapsedMs = Math.max(0, answeredAtMs - startedAtMs);
-    const durationMs = this.currentQuestion(state).durationMs || state.questionDurationMs;
+    const durationMs = this.durationForQuestion(state);
+
+    if (!durationMs) {
+      void fallbackNow;
+      return CORRECT_ANSWER_POINTS;
+    }
+
     const remainingRatio = Math.max(0, Math.min(1, (durationMs - elapsedMs) / durationMs));
 
     if (!Number.isFinite(remainingRatio)) {

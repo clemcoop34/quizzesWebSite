@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
-import type { ImageRegionDto, QuizReportReason } from "@quiz/shared";
+import { parseQpucProgressiveQuestions, type ImageRegionDto, type QuizReportReason } from "@quiz/shared";
 import { PrismaService } from "../prisma/prisma.service.js";
 import type { CreateQuizBody } from "./quizzes.controller.js";
 
@@ -179,6 +179,7 @@ export class QuizzesService {
         sourceCity: body.sourceCity?.trim() || null,
         sourceYear: body.sourceYear?.trim() || null,
         trainingYear: body.trainingYear?.trim() || null,
+        qpucQuestions: parseQpucProgressiveQuestions(body.qpucQuestions) as unknown as Prisma.InputJsonValue,
         quizTags: {
           create: tags.map((tagName) => ({
             tag: {
@@ -190,7 +191,7 @@ export class QuizzesService {
           }))
         },
         questions: {
-          create: body.questions.map((question, questionIndex) => ({
+          create: (body.questions ?? []).map((question, questionIndex) => ({
             type: this.toPrismaQuestionType(question.type ?? "multiple_choice"),
             prompt: question.prompt,
             imageUrl: question.imageUrl || null,
@@ -233,7 +234,9 @@ export class QuizzesService {
       throw new BadRequestException("Quiz title is required");
     }
 
-    if (!body.questions?.length) {
+    const qpucQuestions = parseQpucProgressiveQuestions(body.qpucQuestions);
+
+    if (!body.questions?.length && qpucQuestions.length === 0) {
       throw new BadRequestException("At least one question is required");
     }
 
@@ -251,7 +254,13 @@ export class QuizzesService {
       }
     }
 
-    body.questions.forEach((question, index) => {
+    qpucQuestions.forEach((question, index) => {
+      if (question.clues.length < 4) {
+        throw new BadRequestException(`Question QPUC ${index + 1}: at least four progressive clues are required`);
+      }
+    });
+
+    (body.questions ?? []).forEach((question, index) => {
       const type = question.type ?? "multiple_choice";
 
       if (!question.prompt?.trim()) {
@@ -298,7 +307,7 @@ export class QuizzesService {
     });
   }
 
-  private toPrismaQuestionType(type: NonNullable<CreateQuizBody["questions"][number]["type"]>) {
+  private toPrismaQuestionType(type: NonNullable<NonNullable<CreateQuizBody["questions"]>[number]["type"]>) {
     switch (type) {
       case "image_multiple_choice":
         return "IMAGE_MULTIPLE_CHOICE";
@@ -327,7 +336,7 @@ export class QuizzesService {
   }
 
   private calculateCorrectionPercent(body: CreateQuizBody): number {
-    const correctionItems: Array<{ explanation?: string }> = body.questions.flatMap(
+    const correctionItems: Array<{ explanation?: string }> = (body.questions ?? []).flatMap(
       (question): Array<{ explanation?: string }> => {
         if (question.type === "open_text") {
           return [];
