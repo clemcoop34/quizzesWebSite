@@ -6,6 +6,8 @@
   "scripts": {
     "build": "pnpm -r build",
     "dev": "pnpm --parallel --filter @quiz/api --filter @quiz/web dev",
+    "start": "pnpm --filter @quiz/api start",
+    "build:api": "pnpm --filter @quiz/shared build && pnpm --filter @quiz/game-core build && pnpm --filter @quiz/api prisma:generate && pnpm --filter @quiz/api build",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test",
     "db:generate": "pnpm --filter @quiz/api prisma:generate",
