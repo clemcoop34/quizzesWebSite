@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Post, Put } from "@nestjs/common";
 import type { ImageRegionDto, QpucProgressiveQuestionDto, QuizReportReason } from "@quiz/shared";
 import { QuizzesService } from "./quizzes.service.js";
 
@@ -39,6 +39,11 @@ export class QuizzesController {
   @Delete(":id")
   delete(@Param("id") id: string) {
     return this.quizzesService.delete(id);
+  }
+
+  @Put(":id")
+  update(@Param("id") id: string, @Body() body: CreateQuizBody) {
+    return this.quizzesService.update(id, body);
   }
 
   @Post()

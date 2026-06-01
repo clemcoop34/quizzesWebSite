@@ -25,6 +25,8 @@ interface DashboardQuiz {
   compatibleGameModes: GameModeId[];
 }
 
+type FilterState = "include" | "exclude";
+
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const correctionDisplayMinPercent = 5;
 const visibleTagLimit = 4;
@@ -40,14 +42,14 @@ export function DashboardClient({
   const [search, setSearch] = useState("");
   const [creatorName, setCreatorName] = useState("");
   const [pendingRoomQuizId, setPendingRoomQuizId] = useState<string | null>(null);
-  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [tagFilters, setTagFilters] = useState<Partial<Record<string, FilterState>>>({});
   const [selectedCity, setSelectedCity] = useState("");
   const [selectedSourceYear, setSelectedSourceYear] = useState("");
   const [selectedTrainingYear, setSelectedTrainingYear] = useState("");
-  const [selectedGameModes, setSelectedGameModes] = useState<GameModeId[]>([]);
+  const [gameModeFilters, setGameModeFilters] = useState<Partial<Record<GameModeId, FilterState>>>({});
   const [onlyCorrected, setOnlyCorrected] = useState(false);
   const [isCreatingRoomFor, setIsCreatingRoomFor] = useState<string | null>(null);
-  const [quizzes, setQuizzes] = useState(initialQuizzes);
+  const [quizzes] = useState(initialQuizzes);
   const filterOptions = useMemo(
     () => ({
       cities: uniqueSorted(quizzes.map((quiz) => quiz.sourceCity)),
@@ -78,13 +80,27 @@ export function DashboardClient({
       const matchesSearch =
         searchTokens.length === 0 ||
         searchTokens.every((token) => searchableWords.some((word) => word.includes(token)));
+      const includedTags = Object.entries(tagFilters)
+        .filter(([, state]) => state === "include")
+        .map(([tag]) => tag);
+      const excludedTags = Object.entries(tagFilters)
+        .filter(([, state]) => state === "exclude")
+        .map(([tag]) => tag);
       const matchesTags =
-        selectedTags.length === 0 || selectedTags.every((selectedTag) => quiz.tags.includes(selectedTag));
+        includedTags.every((selectedTag) => quiz.tags.includes(selectedTag)) &&
+        excludedTags.every((selectedTag) => !quiz.tags.includes(selectedTag));
       const matchesCity = !selectedCity || quiz.sourceCity === selectedCity;
       const matchesSourceYear = !selectedSourceYear || quiz.sourceYear === selectedSourceYear;
       const matchesTrainingYear = !selectedTrainingYear || quiz.trainingYear === selectedTrainingYear;
+      const includedGameModes = Object.entries(gameModeFilters)
+        .filter(([, state]) => state === "include")
+        .map(([modeId]) => modeId as GameModeId);
+      const excludedGameModes = Object.entries(gameModeFilters)
+        .filter(([, state]) => state === "exclude")
+        .map(([modeId]) => modeId as GameModeId);
       const matchesGameModes =
-        selectedGameModes.length === 0 || selectedGameModes.every((modeId) => quiz.compatibleGameModes.includes(modeId));
+        includedGameModes.every((modeId) => quiz.compatibleGameModes.includes(modeId)) &&
+        excludedGameModes.every((modeId) => !quiz.compatibleGameModes.includes(modeId));
       const passesReportFilter = quiz.reportCount < QUIZ_REPORT_HIDE_THRESHOLD || isExactTitleSearch;
       const passesCorrectionFilter =
         !onlyCorrected || quiz.correctionPercent >= QUIZ_CORRECTION_FILTER_THRESHOLD;
@@ -100,18 +116,14 @@ export function DashboardClient({
         passesCorrectionFilter
       );
     });
-  }, [quizzes, search, selectedTags, selectedCity, selectedSourceYear, selectedTrainingYear, selectedGameModes, onlyCorrected]);
+  }, [quizzes, search, tagFilters, selectedCity, selectedSourceYear, selectedTrainingYear, gameModeFilters, onlyCorrected]);
 
   function toggleTag(tag: string) {
-    setSelectedTags((previous) =>
-      previous.includes(tag) ? previous.filter((selectedTag) => selectedTag !== tag) : [...previous, tag]
-    );
+    setTagFilters((previous) => cycleTriStateFilter(previous, tag));
   }
 
   function toggleGameMode(modeId: GameModeId) {
-    setSelectedGameModes((previous) =>
-      previous.includes(modeId) ? previous.filter((selectedModeId) => selectedModeId !== modeId) : [...previous, modeId]
-    );
+    setGameModeFilters((previous) => cycleTriStateFilter(previous, modeId));
   }
 
   async function createRoom(quizId: string) {
@@ -130,20 +142,6 @@ export function DashboardClient({
       window.sessionStorage.setItem(`quiz-room:${room.code}:player-id`, room.currentPlayerId);
     }
     router.push(`/room/${room.code}`);
-  }
-
-  async function deleteQuiz(quizId: string) {
-    const confirmed = window.confirm("Supprimer ce quiz et ses données associées ?");
-
-    if (!confirmed) {
-      return;
-    }
-
-    const response = await fetch(`${apiUrl}/quizzes/${quizId}`, { method: "DELETE" });
-
-    if (response.ok) {
-      setQuizzes((previous) => previous.filter((quiz) => quiz.id !== quizId));
-    }
   }
 
   return (
@@ -195,11 +193,11 @@ export function DashboardClient({
           <div className="tag-list">
             {(Object.keys(GAME_MODE_DEFINITIONS) as GameModeId[]).map((modeId) => (
               <button
-                className={selectedGameModes.includes(modeId) ? "tag-pill tag-pill-selected" : "tag-pill"}
+                className={filterPillClass(gameModeFilters[modeId])}
                 key={modeId}
                 type="button"
                 onClick={() => toggleGameMode(modeId)}
-                title={GAME_MODE_DEFINITIONS[modeId].description}
+                title={`${GAME_MODE_DEFINITIONS[modeId].description} Clic 1 : inclure, clic 2 : exclure.`}
               >
                 {GAME_MODE_DEFINITIONS[modeId].shortLabel}
               </button>
@@ -220,10 +218,11 @@ export function DashboardClient({
           </button>
           {tags.map((tag) => (
             <button
-              className={selectedTags.includes(tag) ? "tag-pill tag-pill-selected" : "tag-pill"}
+              className={filterPillClass(tagFilters[tag])}
               key={tag}
               type="button"
               onClick={() => toggleTag(tag)}
+              title="Clic 1 : inclure ce tag. Clic 2 : exclure ce tag."
             >
               {tag}
             </button>
@@ -290,8 +289,8 @@ export function DashboardClient({
                 <button className="secondary-button" type="button" onClick={() => router.push(`/solo/${quiz.id}`)}>
                   Solo
                 </button>
-                <button className="danger-button" type="button" onClick={() => deleteQuiz(quiz.id)}>
-                  Supprimer
+                <button className="secondary-button" type="button" onClick={() => router.push(`/quiz/${quiz.id}/edit`)}>
+                  Éditer
                 </button>
               </div>
             </article>
@@ -355,4 +354,33 @@ function uniqueAcademicYears(values: Array<string | null | undefined>): string[]
 function getAcademicStartYear(value: string): number {
   const year = Number(value.match(/\d{4}/)?.[0] ?? 0);
   return Number.isFinite(year) ? year : 0;
+}
+
+function cycleTriStateFilter<T extends string>(
+  previous: Partial<Record<T, FilterState>>,
+  key: T
+): Partial<Record<T, FilterState>> {
+  const next = { ...previous };
+
+  if (!previous[key]) {
+    next[key] = "include";
+  } else if (previous[key] === "include") {
+    next[key] = "exclude";
+  } else {
+    delete next[key];
+  }
+
+  return next;
+}
+
+function filterPillClass(state?: FilterState): string {
+  if (state === "include") {
+    return "tag-pill tag-pill-selected";
+  }
+
+  if (state === "exclude") {
+    return "tag-pill tag-pill-excluded";
+  }
+
+  return "tag-pill";
 }

@@ -37,6 +37,7 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   const [textAnswer, setTextAnswer] = useState("");
   const [answerValidated, setAnswerValidated] = useState(false);
   const [timingMode, setTimingMode] = useState<GameQuestionTimingMode>("dynamic_timer");
+  const [selectedQuestionCount, setSelectedQuestionCount] = useState(quiz.questions.length);
   const [answers, setAnswers] = useState<Record<string, SoloAnswer>>({});
   const [sessionQuestions, setSessionQuestions] = useState(() => quiz.questions);
   const [startedAt, setStartedAt] = useState(0);
@@ -83,7 +84,8 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   }, [phase, remainingMs]);
 
   function start() {
-    const shuffledQuestions = shuffleArray(quiz.questions);
+    const questionLimit = Math.max(1, Math.min(quiz.questions.length, selectedQuestionCount));
+    const shuffledQuestions = shuffleArray(quiz.questions).slice(0, questionLimit);
     setSessionQuestions(shuffledQuestions);
     setAnswers({});
     setQuestionIndex(0);
@@ -217,6 +219,23 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
               {timingMode === "no_timer" ? "Sans chrono activé" : "Sans chrono"}
             </button>
           </div>
+          <label className="question-count-control">
+            <span>Questions jouées</span>
+            <input
+              aria-label="Nombre de questions jouées"
+              max={quiz.questions.length}
+              min={1}
+              type="number"
+              value={selectedQuestionCount}
+              onChange={(event) => {
+                const nextValue = Number(event.target.value);
+                setSelectedQuestionCount(
+                  Number.isFinite(nextValue) ? Math.max(1, Math.min(quiz.questions.length, nextValue)) : quiz.questions.length
+                );
+              }}
+            />
+            <small>/ {quiz.questions.length}</small>
+          </label>
           <button type="button" onClick={start}>
             Lancer
           </button>

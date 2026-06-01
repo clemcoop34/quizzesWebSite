@@ -50,6 +50,7 @@ export function RoomClient({ code }: { code: string }) {
   const [answerValidated, setAnswerValidated] = useState(false);
   const [timingMode, setTimingMode] = useState<GameQuestionTimingMode>("dynamic_timer");
   const [selectedGameMode, setSelectedGameMode] = useState<GameModeId>("classic");
+  const [selectedQuestionCount, setSelectedQuestionCount] = useState<number | null>(null);
   const [answerStatusByPlayerId, setAnswerStatusByPlayerId] = useState<
     Record<string, { hasAnswer: boolean; validated: boolean }>
   >({});
@@ -290,6 +291,17 @@ export function RoomClient({ code }: { code: string }) {
     }
   }, [selectedGameMode]);
 
+  useEffect(() => {
+    if (!quizPreview || selectedGameMode !== "classic") {
+      return;
+    }
+
+    const maxQuestions = quizPreview.questions.length;
+    setSelectedQuestionCount((current) =>
+      current && current > 0 && current <= maxQuestions ? current : maxQuestions
+    );
+  }, [quizPreview, selectedGameMode]);
+
   const rankedPlayers = useMemo(
     () =>
       [...(room?.players ?? [])].sort(
@@ -359,6 +371,7 @@ export function RoomClient({ code }: { code: string }) {
   const qpucScoringPoints = qpucScoringResult ? qpucAwardByPlayerId[qpucScoringResult.playerId] ?? 0 : 0;
   const qpucScoringStreakCount =
     qpucScoringResult && qpucCorrectStreak?.playerId === qpucScoringResult.playerId ? qpucCorrectStreak.count : 1;
+  const classicQuestionMax = quizPreview?.questions.length ?? 0;
 
   function joinRoom() {
     if (isJoined || isJoining) return;
@@ -382,7 +395,11 @@ export function RoomClient({ code }: { code: string }) {
       roomCode: code,
       quizId: room.quizId,
       modeId: selectedGameMode,
-      timingMode
+      timingMode,
+      questionLimit:
+        selectedGameMode === "classic" && selectedQuestionCount && quizPreview
+          ? Math.min(selectedQuestionCount, quizPreview.questions.length)
+          : undefined
     });
   }
 
@@ -609,37 +626,58 @@ export function RoomClient({ code }: { code: string }) {
         </div>
 
         {isHost && room?.status === "lobby" && quizPreview ? (
-          <div className="timing-options room-setup-options" aria-label="Réglages de partie">
-            <button
-              aria-pressed={timingMode === "no_timer"}
-              className={timingMode === "no_timer" ? "timing-option timing-option-active" : "timing-option"}
-              disabled={selectedGameMode === "qpuc_face_to_face"}
-              type="button"
-              onClick={() => {
-                if (selectedGameMode !== "qpuc_face_to_face") {
-                  setTimingMode((current) => (current === "no_timer" ? "dynamic_timer" : "no_timer"));
-                }
-              }}
-            >
-              {selectedGameMode === "qpuc_face_to_face"
-                ? "Sans chrono indisponible"
-                : timingMode === "no_timer"
-                  ? "Sans chrono activé"
-                  : "Sans chrono"}
-            </button>
-            {quizPreview.compatibleGameModes.map((modeId) => (
+          <div className="room-setup-panel stack" aria-label="Réglages de partie">
+            <div className="timing-options room-setup-options">
               <button
-                aria-pressed={selectedGameMode === modeId}
-                className={selectedGameMode === modeId ? "timing-option timing-option-active" : "timing-option"}
-                disabled={quizPreview.compatibleGameModes.length === 1}
-                key={modeId}
+                aria-pressed={timingMode === "no_timer"}
+                className={timingMode === "no_timer" ? "timing-option timing-option-active" : "timing-option"}
+                disabled={selectedGameMode === "qpuc_face_to_face"}
                 type="button"
-                onClick={() => setSelectedGameMode(modeId)}
-                title={GAME_MODE_DEFINITIONS[modeId].description}
+                onClick={() => {
+                  if (selectedGameMode !== "qpuc_face_to_face") {
+                    setTimingMode((current) => (current === "no_timer" ? "dynamic_timer" : "no_timer"));
+                  }
+                }}
               >
-                {GAME_MODE_DEFINITIONS[modeId].shortLabel}
+                {selectedGameMode === "qpuc_face_to_face"
+                  ? "Sans chrono indisponible"
+                  : timingMode === "no_timer"
+                    ? "Sans chrono activé"
+                    : "Sans chrono"}
               </button>
-            ))}
+              {quizPreview.compatibleGameModes.map((modeId) => (
+                <button
+                  aria-pressed={selectedGameMode === modeId}
+                  className={selectedGameMode === modeId ? "timing-option timing-option-active" : "timing-option"}
+                  disabled={quizPreview.compatibleGameModes.length === 1}
+                  key={modeId}
+                  type="button"
+                  onClick={() => setSelectedGameMode(modeId)}
+                  title={GAME_MODE_DEFINITIONS[modeId].description}
+                >
+                  {GAME_MODE_DEFINITIONS[modeId].shortLabel}
+                </button>
+              ))}
+            </div>
+            {selectedGameMode === "classic" && classicQuestionMax > 0 ? (
+              <label className="question-count-control">
+                <span>Questions jouées</span>
+                <input
+                  aria-label="Nombre de questions jouées"
+                  max={classicQuestionMax}
+                  min={1}
+                  type="number"
+                  value={selectedQuestionCount ?? classicQuestionMax}
+                  onChange={(event) => {
+                    const nextValue = Number(event.target.value);
+                    setSelectedQuestionCount(
+                      Number.isFinite(nextValue) ? Math.max(1, Math.min(classicQuestionMax, nextValue)) : classicQuestionMax
+                    );
+                  }}
+                />
+                <small>/ {classicQuestionMax}</small>
+              </label>
+            ) : null}
           </div>
         ) : null}
 

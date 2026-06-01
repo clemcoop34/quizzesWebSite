@@ -523,6 +523,12 @@ button:disabled {
   background: rgba(34, 197, 94, 0.18);
 }
 
+.tag-pill-excluded {
+  border-color: rgba(244, 63, 94, 0.72);
+  background: rgba(244, 63, 94, 0.16);
+  color: #fecdd3;
+}
+
 .quiz-card-header h2 {
   margin-bottom: 6px;
 }
@@ -905,6 +911,33 @@ button:disabled {
 
 .room-setup-options {
   align-items: center;
+}
+
+.room-setup-panel {
+  border: 1px solid rgba(56, 189, 248, 0.16);
+  border-radius: 8px;
+  background: rgba(8, 13, 24, 0.38);
+  padding: 12px;
+}
+
+.question-count-control {
+  display: grid;
+  grid-template-columns: minmax(120px, auto) 88px auto;
+  gap: 10px;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.question-count-control input {
+  height: 38px;
+  text-align: center;
+}
+
+.question-count-control small {
+  color: var(--muted);
 }
 
 .qpuc-play-row {

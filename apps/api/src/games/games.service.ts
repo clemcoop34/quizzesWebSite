@@ -95,7 +95,7 @@ export class GamesService {
     await this.engine.initialize({
       sessionId: session.id,
       roomCode: room.code,
-      quiz: this.toGameQuiz(quiz),
+      quiz: this.toGameQuiz(quiz, payload.modeId, payload.questionLimit),
       players: room.players.map((player) => ({
         id: player.id,
         displayName: player.displayName,
@@ -310,9 +310,19 @@ export class GamesService {
     return quiz;
   }
 
-  private toGameQuiz(quiz: Awaited<ReturnType<GamesService["loadQuiz"]>>): GameQuiz {
-    const shuffledQuestions = this.shuffleArray(quiz.questions);
-    const shuffledQpucQuestions = this.shuffleArray(parseQpucProgressiveQuestions(quiz.qpucQuestions));
+  private toGameQuiz(
+    quiz: Awaited<ReturnType<GamesService["loadQuiz"]>>,
+    modeId: GameModeId,
+    questionLimit?: number
+  ): GameQuiz {
+    const limit = Number.isInteger(questionLimit) && questionLimit && questionLimit > 0 ? questionLimit : undefined;
+    const shuffledQuestions =
+      modeId === "classic" ? this.shuffleArray(quiz.questions).slice(0, limit ?? quiz.questions.length) : this.shuffleArray(quiz.questions);
+    const allQpucQuestions = parseQpucProgressiveQuestions(quiz.qpucQuestions);
+    const shuffledQpucQuestions =
+      modeId === "qpuc_face_to_face"
+        ? this.shuffleArray(allQpucQuestions).slice(0, limit ?? allQpucQuestions.length)
+        : this.shuffleArray(allQpucQuestions);
 
     return {
       id: quiz.id,

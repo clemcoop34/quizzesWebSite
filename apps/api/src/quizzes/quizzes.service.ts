@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-import type { Prisma } from "@prisma/client";
+import type { Prisma, QuestionType } from "@prisma/client";
 import { parseQpucProgressiveQuestions, type ImageRegionDto, type QuizReportReason } from "@quiz/shared";
 import { PrismaService } from "../prisma/prisma.service.js";
 import type { CreateQuizBody } from "./quizzes.controller.js";
@@ -167,66 +167,106 @@ export class QuizzesService {
 
   create(body: CreateQuizBody) {
     this.validateCreateBody(body);
-    const tags = [...new Set((body.tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))];
-    const correctionPercent = this.calculateCorrectionPercent(body);
 
     return this.prisma.quiz.create({
-      data: {
-        title: body.title,
-        description: body.description,
-        correctionPercent,
-        sourceType: body.sourceType ?? null,
-        sourceCity: body.sourceCity?.trim() || null,
-        sourceYear: body.sourceYear?.trim() || null,
-        trainingYear: body.trainingYear?.trim() || null,
-        qpucQuestions: parseQpucProgressiveQuestions(body.qpucQuestions) as unknown as Prisma.InputJsonValue,
+      data: this.toQuizWriteData(body),
+      include: this.quizWriteInclude()
+    });
+  }
+
+  async update(id: string, body: CreateQuizBody) {
+    this.validateCreateBody(body);
+    await this.get(id);
+
+    const quiz = await this.prisma.$transaction(async (tx) => {
+      await tx.quizTag.deleteMany({ where: { quizId: id } });
+      await tx.question.deleteMany({ where: { quizId: id } });
+
+      return tx.quiz.update({
+        where: { id },
+        data: this.toQuizWriteData(body),
+        include: this.quizWriteInclude()
+      });
+    });
+
+    await this.prisma.tag.deleteMany({
+      where: {
         quizTags: {
-          create: tags.map((tagName) => ({
-            tag: {
-              connectOrCreate: {
-                where: { name: tagName },
-                create: { name: tagName }
-              }
-            }
-          }))
-        },
-        questions: {
-          create: (body.questions ?? []).map((question, questionIndex) => ({
-            type: this.toPrismaQuestionType(question.type ?? "multiple_choice"),
-            prompt: question.prompt,
-            imageUrl: question.imageUrl || null,
-            imageRegions:
-              question.type === "image_region"
-                ? (this.cleanImageRegions(question.imageRegions ?? []) as unknown as Prisma.InputJsonValue)
-                : [],
-            imageRegionExplanation:
-              question.type === "image_region" ? question.imageRegionExplanation?.trim() || null : null,
-            acceptedTextAnswers: question.acceptedTextAnswers ?? [],
-            order: questionIndex + 1,
-            durationMs: question.durationMs ?? 20_000,
-            answerOptions:
-              question.type === "open_text" || question.type === "image_region"
-                ? undefined
-                : {
-                    create: (question.options ?? []).map((option, optionIndex) => ({
-                      label: option.label,
-                      isCorrect: option.isCorrect,
-                      explanation: option.explanation?.trim() || null,
-                      order: optionIndex + 1
-                    }))
-                  }
-          }))
-        }
-      },
-      include: {
-        questions: {
-          include: { answerOptions: true }
-        },
-        quizTags: {
-          include: { tag: true }
+          none: {}
         }
       }
     });
+
+    return quiz;
+  }
+
+  private toQuizWriteData(body: CreateQuizBody) {
+    const tags = [...new Set((body.tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))];
+    const correctionPercent = this.calculateCorrectionPercent(body);
+
+    return {
+      title: body.title,
+      description: body.description,
+      correctionPercent,
+      sourceType: body.sourceType ?? null,
+      sourceCity: body.sourceCity?.trim() || null,
+      sourceYear: body.sourceYear?.trim() || null,
+      trainingYear: body.trainingYear?.trim() || null,
+      qpucQuestions: parseQpucProgressiveQuestions(body.qpucQuestions) as unknown as Prisma.InputJsonValue,
+      quizTags: {
+        create: tags.map((tagName) => ({
+          tag: {
+            connectOrCreate: {
+              where: { name: tagName },
+              create: { name: tagName }
+            }
+          }
+        }))
+      },
+      questions: {
+        create: (body.questions ?? []).map((question, questionIndex) => ({
+          type: this.toPrismaQuestionType(question.type ?? "multiple_choice"),
+          prompt: question.prompt,
+          imageUrl: question.imageUrl || null,
+          imageRegions:
+            question.type === "image_region"
+              ? (this.cleanImageRegions(question.imageRegions ?? []) as unknown as Prisma.InputJsonValue)
+              : [],
+          imageRegionExplanation:
+            question.type === "image_region" ? question.imageRegionExplanation?.trim() || null : null,
+          acceptedTextAnswers: question.acceptedTextAnswers ?? [],
+          order: questionIndex + 1,
+          durationMs: question.durationMs ?? 20_000,
+          answerOptions:
+            question.type === "open_text" || question.type === "image_region"
+              ? undefined
+              : {
+                  create: (question.options ?? []).map((option, optionIndex) => ({
+                    label: option.label,
+                    isCorrect: option.isCorrect,
+                    explanation: option.explanation?.trim() || null,
+                    order: optionIndex + 1
+                  }))
+                }
+        }))
+      }
+    };
+  }
+
+  private quizWriteInclude() {
+    return {
+      questions: {
+        orderBy: { order: "asc" as const },
+        include: {
+          answerOptions: {
+            orderBy: { order: "asc" as const }
+          }
+        }
+      },
+      quizTags: {
+        include: { tag: true }
+      }
+    };
   }
 
   private validateCreateBody(body: CreateQuizBody): void {
@@ -307,7 +347,9 @@ export class QuizzesService {
     });
   }
 
-  private toPrismaQuestionType(type: NonNullable<NonNullable<CreateQuizBody["questions"]>[number]["type"]>) {
+  private toPrismaQuestionType(
+    type: NonNullable<NonNullable<CreateQuizBody["questions"]>[number]["type"]>
+  ): QuestionType {
     switch (type) {
       case "image_multiple_choice":
         return "IMAGE_MULTIPLE_CHOICE";

@@ -168,6 +168,7 @@ export interface StartGamePayload {
   quizId: Id;
   modeId: GameModeId;
   timingMode?: GameQuestionTimingMode;
+  questionLimit?: number;
 }
 
 export interface GameQuestionStartedPayload {

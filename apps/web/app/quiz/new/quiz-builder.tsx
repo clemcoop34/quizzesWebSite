@@ -2,7 +2,7 @@
 
 import { useMemo, useState, type PointerEvent } from "react";
 import { useRouter } from "next/navigation";
-import type { ImagePointDto, ImageRegionDto } from "@quiz/shared";
+import { parseQpucProgressiveQuestions, type ImagePointDto, type ImageRegionDto } from "@quiz/shared";
 import {
   DocumentJsonExtractionError,
   extractQuizFromDocumentJson,
@@ -52,6 +52,33 @@ interface MetadataOptions {
   cities: string[];
   sourceYears: string[];
   trainingYears: string[];
+}
+
+type PersistedQuestionType = "MULTIPLE_CHOICE" | "IMAGE_MULTIPLE_CHOICE" | "IMAGE_REGION" | "OPEN_TEXT";
+
+export interface InitialQuizForBuilder {
+  id: string;
+  title: string;
+  sourceType?: string | null;
+  sourceCity?: string | null;
+  sourceYear?: string | null;
+  trainingYear?: string | null;
+  qpucQuestions?: unknown;
+  quizTags?: Array<{ tag: { name: string } }>;
+  questions?: Array<{
+    id: string;
+    type: PersistedQuestionType;
+    prompt: string;
+    imageUrl?: string | null;
+    imageRegions?: unknown;
+    imageRegionExplanation?: string | null;
+    acceptedTextAnswers?: string[];
+    answerOptions?: Array<{
+      label: string;
+      isCorrect: boolean;
+      explanation?: string | null;
+    }>;
+  }>;
 }
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
@@ -276,20 +303,25 @@ Ne montre pas ton raisonnement interne.
 Ne fournis que le fichier JSON téléchargeable.`;
 
 export function QuizBuilder({
+  initialQuiz,
   initialMetadataOptions,
   initialTags
 }: {
+  initialQuiz?: InitialQuizForBuilder;
   initialMetadataOptions: MetadataOptions;
   initialTags: string[];
 }) {
   const router = useRouter();
-  const [title, setTitle] = useState("");
-  const [questions, setQuestions] = useState<DraftQuestion[]>([]);
-  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const isEditing = Boolean(initialQuiz);
+  const [title, setTitle] = useState(initialQuiz?.title ?? "");
+  const [questions, setQuestions] = useState<DraftQuestion[]>(() => toDraftQuestionsFromInitialQuiz(initialQuiz));
+  const [selectedTags, setSelectedTags] = useState<string[]>(
+    () => initialQuiz?.quizTags?.map((quizTag) => quizTag.tag.name) ?? []
+  );
   const [customTag, setCustomTag] = useState("");
-  const [sourceCity, setSourceCity] = useState("");
-  const [sourceYear, setSourceYear] = useState("");
-  const [trainingYear, setTrainingYear] = useState("");
+  const [sourceCity, setSourceCity] = useState(initialQuiz?.sourceCity ?? "");
+  const [sourceYear, setSourceYear] = useState(initialQuiz?.sourceYear ?? "");
+  const [trainingYear, setTrainingYear] = useState(initialQuiz?.trainingYear ?? "");
   const [showMoodleImport, setShowMoodleImport] = useState(false);
   const [moodleHtml, setMoodleHtml] = useState("");
   const [moodleImportError, setMoodleImportError] = useState<string | null>(null);
@@ -300,7 +332,9 @@ export function QuizBuilder({
   const [documentPromptCopied, setDocumentPromptCopied] = useState(false);
   const [showQpucImport, setShowQpucImport] = useState(false);
   const [qpucJson, setQpucJson] = useState("");
-  const [qpucQuestions, setQpucQuestions] = useState<DraftQpucQuestion[]>([]);
+  const [qpucQuestions, setQpucQuestions] = useState<DraftQpucQuestion[]>(
+    () => parseInitialQpucQuestions(initialQuiz?.qpucQuestions)
+  );
   const [qpucImportError, setQpucImportError] = useState<string | null>(null);
   const [qpucImportMessage, setQpucImportMessage] = useState<string | null>(null);
   const [qpucPromptCopied, setQpucPromptCopied] = useState(false);
@@ -327,6 +361,7 @@ export function QuizBuilder({
   const lastQuestion = questions.at(-1);
   const canAddQuestion = !lastQuestion || validateQuestion(lastQuestion) === null;
   const hasUnessImport = questions.some((question) => question.importedFromMoodle);
+  const isUnessQuiz = hasUnessImport || initialQuiz?.sourceType === "uness";
   const tagSuggestions = availableTags
     .filter((tag) => customTag.trim() && !selectedTags.includes(tag) && isSimilarTag(tag, customTag))
     .slice(0, 6);
@@ -575,7 +610,7 @@ export function QuizBuilder({
       return;
     }
 
-    if (hasUnessImport) {
+    if (isUnessQuiz) {
       if (!sourceCity.trim()) {
         setError("Renseigne la ville de l'annale UNESS.");
         return;
@@ -603,13 +638,13 @@ export function QuizBuilder({
     setIsSubmitting(true);
 
     try {
-      const response = await fetch(`${apiUrl}/quizzes`, {
-        method: "POST",
+      const response = await fetch(isEditing ? `${apiUrl}/quizzes/${initialQuiz?.id}` : `${apiUrl}/quizzes`, {
+        method: isEditing ? "PUT" : "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           title,
           tags: selectedTags,
-          ...(hasUnessImport
+          ...(isUnessQuiz
             ? {
                 sourceType: "uness",
                 sourceCity: sourceCity.trim(),
@@ -629,15 +664,43 @@ export function QuizBuilder({
       await response.json();
       router.push("/dashboard");
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Impossible de créer le quiz.");
+      setError(submitError instanceof Error ? submitError.message : "Impossible d'enregistrer le quiz.");
       setIsSubmitting(false);
     }
+  }
+
+  async function deleteCurrentQuiz() {
+    if (!initialQuiz) return;
+
+    const confirmed = window.confirm("Supprimer ce quiz et toutes ses données associées ?");
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    const response = await fetch(`${apiUrl}/quizzes/${initialQuiz.id}`, { method: "DELETE" });
+
+    if (!response.ok) {
+      setError(await response.text());
+      setIsSubmitting(false);
+      return;
+    }
+
+    router.push("/dashboard");
   }
 
   return (
     <main className="stack">
       <section className="panel stack">
-        <h1>Nouveau quiz</h1>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <h1>{isEditing ? "Modifier le quiz" : "Nouveau quiz"}</h1>
+          {isEditing ? (
+            <button className="danger-button" disabled={isSubmitting} type="button" onClick={deleteCurrentQuiz}>
+              Supprimer ce quiz
+            </button>
+          ) : null}
+        </div>
         <label className="stack">
           Titre
           <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Titre du quiz" />
@@ -683,7 +746,7 @@ export function QuizBuilder({
             </div>
           ) : null}
 
-          {showMoodleImport || hasUnessImport ? (
+          {showMoodleImport || isUnessQuiz ? (
             <div className="stack metadata-panel">
               <h3>Métadonnées UNESS</h3>
               <div className="grid">
@@ -736,7 +799,7 @@ export function QuizBuilder({
                 </div>
               ) : null}
 
-              {hasUnessImport ? (
+              {isUnessQuiz ? (
                 <p className="muted">Ces champs sont obligatoires parce que des questions UNESS ont été importées.</p>
               ) : null}
             </div>
@@ -1093,7 +1156,7 @@ export function QuizBuilder({
 
         {error ? <p role="alert">{error}</p> : null}
         <button type="button" disabled={isSubmitting} onClick={submit}>
-          {isSubmitting ? "Création..." : "Créer le quiz"}
+          {isSubmitting ? "Enregistrement..." : isEditing ? "Enregistrer les modifications" : "Créer le quiz"}
         </button>
       </section>
     </main>
@@ -1111,6 +1174,49 @@ function newQuestion(type: QuestionType): DraftQuestion {
     options: Array.from({ length: 5 }, () => ({ label: "", isCorrect: false, explanation: "" })),
     acceptedTextAnswers: ""
   };
+}
+
+function toDraftQuestionsFromInitialQuiz(initialQuiz?: InitialQuizForBuilder): DraftQuestion[] {
+  return (initialQuiz?.questions ?? []).map((question) => ({
+    id: crypto.randomUUID(),
+    type: toDraftQuestionType(question.type),
+    prompt: question.prompt,
+    imageUrl: question.imageUrl ?? "",
+    imageRegions: parseImageRegions(question.imageRegions),
+    imageRegionExplanation: question.imageRegionExplanation ?? "",
+    options:
+      question.answerOptions?.map((option) => ({
+        label: option.label,
+        isCorrect: option.isCorrect,
+        explanation: option.explanation ?? ""
+      })) ?? Array.from({ length: 5 }, () => ({ label: "", isCorrect: false, explanation: "" })),
+    acceptedTextAnswers: (question.acceptedTextAnswers ?? []).join("\n")
+  }));
+}
+
+function toDraftQuestionType(type: PersistedQuestionType): QuestionType {
+  switch (type) {
+    case "IMAGE_MULTIPLE_CHOICE":
+      return "image_multiple_choice";
+    case "IMAGE_REGION":
+      return "image_region";
+    case "OPEN_TEXT":
+      return "open_text";
+    case "MULTIPLE_CHOICE":
+    default:
+      return "multiple_choice";
+  }
+}
+
+function parseInitialQpucQuestions(value: unknown): DraftQpucQuestion[] {
+  return parseQpucProgressiveQuestions(value).map((question) => ({
+    id: question.id,
+    theme: question.theme,
+    answer: question.answer,
+    acceptedAnswers: question.acceptedAnswers,
+    clues: question.clues,
+    sourceReference: question.sourceReference
+  }));
 }
 
 function toDraftQuestionFromMoodle(question: ExtractedQuestion): DraftQuestion | null {
@@ -1355,6 +1461,40 @@ function toPayloadQpucQuestion(question: DraftQpucQuestion) {
     clues: question.clues,
     sourceReference: question.sourceReference
   };
+}
+
+function parseImageRegions(value: unknown): ImageRegionDto[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((region, index) => {
+      if (!region || typeof region !== "object" || !Array.isArray((region as { points?: unknown }).points)) {
+        return null;
+      }
+
+      const points = (region as { points: unknown[] }).points
+        .map((point) => {
+          if (!point || typeof point !== "object") {
+            return null;
+          }
+
+          const x = Number((point as { x?: unknown }).x);
+          const y = Number((point as { y?: unknown }).y);
+
+          return Number.isFinite(x) && Number.isFinite(y) ? { x: clamp(x), y: clamp(y) } : null;
+        })
+        .filter((point): point is ImagePointDto => point !== null);
+
+      return points.length >= 3
+        ? {
+            id: typeof (region as { id?: unknown }).id === "string" ? (region as { id: string }).id : `region-${index + 1}`,
+            points
+          }
+        : null;
+    })
+    .filter((region): region is ImageRegionDto => region !== null);
 }
 
 function ImageRegionEditor({
