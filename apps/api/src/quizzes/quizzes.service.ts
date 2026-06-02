@@ -18,6 +18,17 @@ export class QuizzesService {
         reports: {
           select: { id: true }
         },
+        questions: {
+          select: {
+            id: true,
+            type: true,
+            answerOptions: {
+              select: {
+                isCorrect: true
+              }
+            }
+          }
+        },
         _count: {
           select: { questions: true }
         }

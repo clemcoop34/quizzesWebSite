@@ -242,6 +242,11 @@ export function DashboardClient({
         <div className="grid">
           {filteredQuizzes.map((quiz) => (
             <article className="card stack" key={quiz.id}>
+              {(() => {
+                const isSoloAvailable = quiz.compatibleGameModes.includes("classic");
+
+                return (
+                  <>
               <div className="quiz-card-header">
                 <h2>{quiz.title}</h2>
                 <p className="muted">
@@ -286,13 +291,25 @@ export function DashboardClient({
                 >
                   {isCreatingRoomFor === quiz.id ? "Création..." : "Créer une room"}
                 </button>
-                <button className="secondary-button" type="button" onClick={() => router.push(`/solo/${quiz.id}`)}>
-                  Solo
+                <button
+                  className="secondary-button"
+                  disabled={!isSoloAvailable}
+                  title={isSoloAvailable ? "Jouer ce quiz en solo" : "Le solo nécessite des questions Classic"}
+                  type="button"
+                  onClick={() => router.push(`/solo/${quiz.id}`)}
+                >
+                  {isSoloAvailable ? "Solo" : "Solo indisponible"}
                 </button>
                 <button className="secondary-button" type="button" onClick={() => router.push(`/quiz/${quiz.id}/edit`)}>
                   Éditer
                 </button>
               </div>
+              {!isSoloAvailable ? (
+                <p className="muted">Ce quiz se lance en room avec le mode Face-à-face.</p>
+              ) : null}
+              </>
+                );
+              })()}
             </article>
           ))}
         </div>

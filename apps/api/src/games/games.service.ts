@@ -55,6 +55,10 @@ export class GamesService {
       throw new BadRequestException("Only the room creator can start the game");
     }
 
+    if (payload.modeId === "qvgdm") {
+      throw new BadRequestException("Le mode QVGDM se joue uniquement en solo");
+    }
+
     const quiz = room.quiz && room.quiz.id === payload.quizId ? room.quiz : await this.loadQuiz(payload.quizId);
     const compatibleModes = getCompatibleModes({
       sourceType: quiz.sourceType,

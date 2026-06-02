@@ -1,6 +1,6 @@
 export type Id = string;
 
-export type GameModeId = "classic" | "qpuc_face_to_face";
+export type GameModeId = "classic" | "qpuc_face_to_face" | "qvgdm";
 export type QuestionType = "multiple_choice" | "image_multiple_choice" | "image_region" | "open_text";
 export type QuizReportReason = "wrong_content" | "offensive_content" | "incorrect_uness_metadata" | "other";
 
@@ -17,8 +17,15 @@ export const GAME_MODE_DEFINITIONS: Record<GameModeId, { label: string; shortLab
     label: "Face-à-face",
     shortLabel: "Face-à-face",
     description: "Duel à 2 joueurs inspiré de Questions pour un champion."
+  },
+  qvgdm: {
+    label: "Qui veut gagner des millions",
+    shortLabel: "QVGDM",
+    description: "Mode solo à 4 propositions, une bonne réponse et deux aides."
   }
 };
+
+export const ROOM_GAME_MODE_IDS = ["classic", "qpuc_face_to_face"] satisfies GameModeId[];
 
 export const CLASSIC_TIMING_CONFIG = {
   fallbackQuestionDurationMs: 20_000,
@@ -312,6 +319,8 @@ export interface QuizCompatibilityInput {
   questions?: Array<{
     type?: string | null;
     acceptedTextAnswers?: string[] | null;
+    answerOptions?: Array<{ isCorrect?: boolean | null }> | null;
+    options?: Array<{ isCorrect?: boolean | null }> | null;
   }>;
 }
 
@@ -319,8 +328,31 @@ export function getCompatibleGameModesForQuiz(quiz: QuizCompatibilityInput): Gam
   const hasClassicQuestions = quiz.questions ? quiz.questions.length > 0 : (quiz.questionCount ?? 1) > 0;
   const modes: GameModeId[] = hasClassicQuestions ? ["classic"] : [];
   const qpucQuestions = parseQpucProgressiveQuestions(quiz.qpucQuestions);
+  const hasQvgdmQuestions = quiz.questions?.some(isQvgdmCompatibleQuestion) ?? false;
+
+  if (hasQvgdmQuestions) {
+    modes.push("qvgdm");
+  }
 
   return qpucQuestions.length > 0 ? [...modes, "qpuc_face_to_face"] : modes;
+}
+
+export function isQvgdmCompatibleQuestion(question: {
+  type?: string | null;
+  answerOptions?: Array<{ isCorrect?: boolean | null }> | null;
+  options?: Array<{ isCorrect?: boolean | null }> | null;
+}): boolean {
+  const type = question.type?.toLowerCase();
+
+  if (type !== "multiple_choice" && type !== "image_multiple_choice") {
+    return false;
+  }
+
+  const options = question.answerOptions ?? question.options ?? [];
+  const correctCount = options.filter((option) => option.isCorrect).length;
+  const wrongCount = options.length - correctCount;
+
+  return options.length >= 4 && correctCount >= 1 && wrongCount >= 3;
 }
 
 export function parseQpucProgressiveQuestions(value: unknown): QpucProgressiveQuestionDto[] {

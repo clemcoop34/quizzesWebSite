@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { io, type Socket } from "socket.io-client";
-import { GAME_MODE_DEFINITIONS } from "@quiz/shared";
+import { GAME_MODE_DEFINITIONS, ROOM_GAME_MODE_IDS } from "@quiz/shared";
 import type {
   ClientToServerEvents,
   GameFinishedPayload,
@@ -268,6 +268,13 @@ export function RoomClient({ code }: { code: string }) {
 
   const currentPlayer = room?.players.find((player) => player.id === currentPlayerId);
   const quizPreview: RoomQuizPreviewDto | null = room?.quiz ?? null;
+  const roomCompatibleGameModes = useMemo(
+    () =>
+      (quizPreview?.compatibleGameModes ?? []).filter((modeId) =>
+        (ROOM_GAME_MODE_IDS as readonly GameModeId[]).includes(modeId)
+      ),
+    [quizPreview?.compatibleGameModes]
+  );
   const hostPlayer = room?.players.find((player) => player.id === room.hostPlayerId);
   const isJoined = Boolean(currentPlayer);
   const isHost = Boolean(currentPlayer?.isHost);
@@ -278,12 +285,12 @@ export function RoomClient({ code }: { code: string }) {
   const explanationsByOptionId = new Map(ended?.explanations.map((item) => [item.optionId, item.explanation]) ?? []);
   const playerResultById = new Map(ended?.playerResults.map((result) => [result.playerId, result.status]) ?? []);
   useEffect(() => {
-    if (!quizPreview || quizPreview.compatibleGameModes.includes(selectedGameMode)) {
+    if (!quizPreview || roomCompatibleGameModes.includes(selectedGameMode)) {
       return;
     }
 
-    setSelectedGameMode(quizPreview.compatibleGameModes[0] ?? "classic");
-  }, [quizPreview, selectedGameMode]);
+    setSelectedGameMode(roomCompatibleGameModes[0] ?? "classic");
+  }, [quizPreview, roomCompatibleGameModes, selectedGameMode]);
 
   useEffect(() => {
     if (selectedGameMode === "qpuc_face_to_face") {
@@ -645,11 +652,11 @@ export function RoomClient({ code }: { code: string }) {
                     ? "Sans chrono activé"
                     : "Sans chrono"}
               </button>
-              {quizPreview.compatibleGameModes.map((modeId) => (
+              {roomCompatibleGameModes.map((modeId) => (
                 <button
                   aria-pressed={selectedGameMode === modeId}
                   className={selectedGameMode === modeId ? "timing-option timing-option-active" : "timing-option"}
-                  disabled={quizPreview.compatibleGameModes.length === 1}
+                  disabled={roomCompatibleGameModes.length === 1}
                   key={modeId}
                   type="button"
                   onClick={() => setSelectedGameMode(modeId)}

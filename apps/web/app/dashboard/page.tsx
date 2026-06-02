@@ -59,6 +59,10 @@ function toDashboardQuiz(quiz: {
   trainingYear?: string | null;
   qpucQuestions?: unknown;
   _count?: { questions: number };
+  questions?: Array<{
+    type?: string | null;
+    answerOptions?: Array<{ isCorrect?: boolean | null }>;
+  }>;
   quizTags?: Array<{ tag: { name: string } }>;
 }) {
   return {
@@ -76,7 +80,8 @@ function toDashboardQuiz(quiz: {
     compatibleGameModes: getCompatibleGameModesForQuiz({
       sourceType: quiz.sourceType,
       qpucQuestions: quiz.qpucQuestions,
-      questionCount: quiz._count?.questions ?? 0
+      questionCount: quiz._count?.questions ?? 0,
+      questions: quiz.questions
     }),
     tags: quiz.quizTags?.map((quizTag) => quizTag.tag.name) ?? []
   };

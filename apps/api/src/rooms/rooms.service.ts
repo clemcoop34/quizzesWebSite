@@ -200,7 +200,12 @@ export class RoomsService {
                 id: true,
                 prompt: true,
                 type: true,
-                acceptedTextAnswers: true
+                acceptedTextAnswers: true,
+                answerOptions: {
+                  select: {
+                    isCorrect: true
+                  }
+                }
               }
             },
             quizTags: {
@@ -356,6 +361,7 @@ function toRoomQuizPreview(quiz: {
     prompt: string;
     type: string;
     acceptedTextAnswers: string[];
+    answerOptions?: Array<{ isCorrect: boolean }>;
   }>;
   quizTags: Array<{ tag: { name: string } }>;
 }): RoomQuizPreviewDto {

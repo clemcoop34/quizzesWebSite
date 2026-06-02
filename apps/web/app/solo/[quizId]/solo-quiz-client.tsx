@@ -1,7 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useState, type PointerEvent } from "react";
-import { calculateClassicQuestionDurationMs, type GameQuestionTimingMode, type ImagePointDto, type ImageRegionDto, type QuizReportReason } from "@quiz/shared";
+import {
+  calculateClassicQuestionDurationMs,
+  isQvgdmCompatibleQuestion,
+  type GameQuestionTimingMode,
+  type ImagePointDto,
+  type ImageRegionDto,
+  type QuizReportReason
+} from "@quiz/shared";
 
 interface SoloQuiz {
   id: string;
@@ -25,12 +32,16 @@ interface SoloQuiz {
 }
 
 type SoloPhase = "idle" | "playing" | "review" | "finished";
+type SoloMode = "classic" | "qvgdm";
 type SoloAnswer = { optionIds: string[]; textAnswer: string; selectedPoint?: ImagePointDto };
 
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const QVGDM_FRIEND_CALL_MS = 30_000;
+const qvgdmPrizeScale = [100, 200, 500, 1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 125_000, 250_000, 500_000, 1_000_000];
 
 export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   const [phase, setPhase] = useState<SoloPhase>("idle");
+  const [soloMode, setSoloMode] = useState<SoloMode>("classic");
   const [questionIndex, setQuestionIndex] = useState(0);
   const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
   const [selectedPoint, setSelectedPoint] = useState<ImagePointDto | null>(null);
@@ -38,6 +49,13 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   const [answerValidated, setAnswerValidated] = useState(false);
   const [timingMode, setTimingMode] = useState<GameQuestionTimingMode>("dynamic_timer");
   const [selectedQuestionCount, setSelectedQuestionCount] = useState(quiz.questions.length);
+  const [hiddenQvgdmOptionIds, setHiddenQvgdmOptionIds] = useState<string[]>([]);
+  const [hasUsedFiftyFifty, setHasUsedFiftyFifty] = useState(false);
+  const [hasUsedFriendCall, setHasUsedFriendCall] = useState(false);
+  const [friendCallStartedAt, setFriendCallStartedAt] = useState<number | null>(null);
+  const [friendCallEndsAt, setFriendCallEndsAt] = useState<number | null>(null);
+  const [questionPauseMs, setQuestionPauseMs] = useState(0);
+  const [qvgdmScore, setQvgdmScore] = useState(0);
   const [answers, setAnswers] = useState<Record<string, SoloAnswer>>({});
   const [sessionQuestions, setSessionQuestions] = useState(() => quiz.questions);
   const [startedAt, setStartedAt] = useState(0);
@@ -48,6 +66,14 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   const [showReportModal, setShowReportModal] = useState(false);
 
   const question = sessionQuestions[questionIndex];
+  const qvgdmEligibleQuestionCount = useMemo(
+    () => quiz.questions.filter(isSoloQvgdmCompatibleQuestion).length,
+    [quiz.questions]
+  );
+  const isQvgdmAvailable = qvgdmEligibleQuestionCount > 0;
+  const currentQuestionMax = soloMode === "qvgdm" ? qvgdmEligibleQuestionCount : quiz.questions.length;
+  const isFriendCallActive = soloMode === "qvgdm" && friendCallStartedAt !== null && friendCallEndsAt !== null && now < friendCallEndsAt;
+  const effectivePauseMs = questionPauseMs + (isFriendCallActive && friendCallStartedAt ? now - friendCallStartedAt : 0);
   const currentQuestionDurationMs = question
     ? calculateClassicQuestionDurationMs({
         prompt: question.prompt,
@@ -55,15 +81,20 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
         acceptedTextAnswers: question.acceptedTextAnswers
       })
     : 20_000;
-  const endsAt = startedAt + currentQuestionDurationMs;
-  const remainingMs = timingMode === "no_timer" ? null : Math.max(0, endsAt - now);
+  const endsAt = startedAt + currentQuestionDurationMs + (soloMode === "qvgdm" ? effectivePauseMs : 0);
+  const remainingMs = timingMode === "no_timer" && soloMode !== "qvgdm" ? null : Math.max(0, endsAt - now);
   const remainingRatio =
-    question && timingMode === "dynamic_timer" ? Math.max(0, Math.min(1, (remainingMs ?? 0) / currentQuestionDurationMs)) : 0;
+    question && (timingMode === "dynamic_timer" || soloMode === "qvgdm")
+      ? Math.max(0, Math.min(1, (remainingMs ?? 0) / currentQuestionDurationMs))
+      : 0;
   const score = useMemo(
     () => sessionQuestions.reduce((total, candidate) => total + gradeSoloAnswer(candidate, answers[candidate.id]).scoreRatio, 0),
     [sessionQuestions, answers]
   );
   const currentCorrectOptionIds = question?.answerOptions.filter((option) => option.isCorrect).map((option) => option.id) ?? [];
+  const selectedQvgdmOption = selectedOptionIds[0]
+    ? question?.answerOptions.find((option) => option.id === selectedOptionIds[0])
+    : undefined;
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 250);
@@ -76,16 +107,39 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   }, []);
 
   useEffect(() => {
-    if (phase !== "playing" || timingMode === "no_timer" || (remainingMs ?? 0) > 0) {
+    setSelectedQuestionCount((current) => {
+      const maxQuestions = Math.max(1, currentQuestionMax);
+      return Math.max(1, Math.min(maxQuestions, current));
+    });
+  }, [currentQuestionMax]);
+
+  useEffect(() => {
+    if (friendCallEndsAt === null || friendCallStartedAt === null || now < friendCallEndsAt) {
+      return;
+    }
+
+    setQuestionPauseMs((current) => current + Math.max(0, friendCallEndsAt - friendCallStartedAt));
+    setFriendCallStartedAt(null);
+    setFriendCallEndsAt(null);
+  }, [friendCallEndsAt, friendCallStartedAt, now]);
+
+  useEffect(() => {
+    if (phase !== "playing" || (timingMode === "no_timer" && soloMode !== "qvgdm") || (remainingMs ?? 0) > 0) {
+      return;
+    }
+
+    if (soloMode === "qvgdm") {
+      finishQvgdmQuestion(null);
       return;
     }
 
     finishCurrentQuestion();
-  }, [phase, remainingMs]);
+  }, [phase, remainingMs, soloMode, timingMode]);
 
   function start() {
-    const questionLimit = Math.max(1, Math.min(quiz.questions.length, selectedQuestionCount));
-    const shuffledQuestions = shuffleArray(quiz.questions).slice(0, questionLimit);
+    const sourceQuestions = soloMode === "qvgdm" ? buildQvgdmQuestions(quiz.questions) : shuffleArray(quiz.questions);
+    const questionLimit = Math.max(1, Math.min(sourceQuestions.length, selectedQuestionCount));
+    const shuffledQuestions = sourceQuestions.slice(0, questionLimit);
     setSessionQuestions(shuffledQuestions);
     setAnswers({});
     setQuestionIndex(0);
@@ -93,6 +147,13 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
     setSelectedPoint(null);
     setTextAnswer("");
     setAnswerValidated(false);
+    setHiddenQvgdmOptionIds([]);
+    setHasUsedFiftyFifty(false);
+    setHasUsedFriendCall(false);
+    setFriendCallStartedAt(null);
+    setFriendCallEndsAt(null);
+    setQuestionPauseMs(0);
+    setQvgdmScore(0);
     setStartedAt(Date.now());
     setNow(Date.now());
     setPhase("playing");
@@ -135,7 +196,44 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
     finishCurrentQuestion();
   }
 
+  function finishQvgdmQuestion(optionId: string | null) {
+    if (phase !== "playing" || soloMode !== "qvgdm" || !question) return;
+
+    const selectedOption = optionId ? question.answerOptions.find((option) => option.id === optionId) : undefined;
+    const isCorrect = Boolean(selectedOption?.isCorrect);
+    const nextAnswers = {
+      ...answers,
+      [question.id]: {
+        optionIds: optionId ? [optionId] : [],
+        textAnswer: ""
+      }
+    };
+    setAnswers(nextAnswers);
+    setSelectedOptionIds(optionId ? [optionId] : []);
+    setAnswerValidated(true);
+    setFriendCallStartedAt(null);
+    setFriendCallEndsAt(null);
+
+    if (isCorrect) {
+      setQvgdmScore(qvgdmPrizeForIndex(questionIndex));
+      setPhase("review");
+      return;
+    }
+
+    setPhase("finished");
+  }
+
   function skipExplanations() {
+    if (soloMode === "qvgdm") {
+      if (!selectedQvgdmOption?.isCorrect || questionIndex >= sessionQuestions.length - 1) {
+        setPhase("finished");
+        return;
+      }
+
+      goToNextQuestion(answers);
+      return;
+    }
+
     goToNextQuestion({
       ...answers,
       [question.id]: {
@@ -160,16 +258,42 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
     setSelectedPoint(previousAnswer?.selectedPoint ?? null);
     setTextAnswer(previousAnswer?.textAnswer ?? "");
     setAnswerValidated(false);
+    setHiddenQvgdmOptionIds([]);
+    setFriendCallStartedAt(null);
+    setFriendCallEndsAt(null);
+    setQuestionPauseMs(0);
     setStartedAt(Date.now());
     setNow(Date.now());
     setPhase("playing");
   }
 
+  function useFiftyFifty() {
+    if (soloMode !== "qvgdm" || hasUsedFiftyFifty || !question || phase !== "playing") return;
+
+    const wrongOptions = shuffleArray(question.answerOptions.filter((option) => !option.isCorrect));
+    setHiddenQvgdmOptionIds(wrongOptions.slice(0, 2).map((option) => option.id));
+    setHasUsedFiftyFifty(true);
+  }
+
+  function useFriendCall() {
+    if (soloMode !== "qvgdm" || hasUsedFriendCall || isFriendCallActive || phase !== "playing") return;
+
+    const startedAtMs = Date.now();
+    setHasUsedFriendCall(true);
+    setFriendCallStartedAt(startedAtMs);
+    setFriendCallEndsAt(startedAtMs + QVGDM_FRIEND_CALL_MS);
+  }
+
   function answerChoiceClass(optionId: string) {
     const classes = ["answer-choice"];
+    const isHiddenQvgdmOption = soloMode === "qvgdm" && hiddenQvgdmOptionIds.includes(optionId);
 
     if (selectedOptionIds.includes(optionId)) {
       classes.push("answer-choice-selected");
+    }
+
+    if (isHiddenQvgdmOption) {
+      classes.push("answer-choice-hidden");
     }
 
     if (phase === "review") {
@@ -206,38 +330,72 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   if (phase === "idle") {
     return (
       <main className="stack">
-        <section className="panel stack">
+        <section className={soloMode === "qvgdm" ? "panel stack qvgdm-lobby-panel" : "panel stack"}>
           <h1>{quiz.title}</h1>
-          <p className="muted">{quiz.questions.length} questions en solo.</p>
-          <div className="timing-options" aria-label="Rythme du quiz">
+          <p className="muted">
+            {soloMode === "qvgdm"
+              ? `${qvgdmEligibleQuestionCount} question${qvgdmEligibleQuestionCount > 1 ? "s" : ""} compatible${
+                  qvgdmEligibleQuestionCount > 1 ? "s" : ""
+                } QVGDM.`
+              : `${quiz.questions.length} questions en solo Classic.`}
+          </p>
+          <div className="timing-options" aria-label="Mode solo">
             <button
-              aria-pressed={timingMode === "no_timer"}
-              className={timingMode === "no_timer" ? "timing-option timing-option-active" : "timing-option"}
+              aria-pressed={soloMode === "classic"}
+              className={soloMode === "classic" ? "timing-option timing-option-active" : "timing-option"}
               type="button"
-              onClick={() => setTimingMode((current) => (current === "no_timer" ? "dynamic_timer" : "no_timer"))}
+              onClick={() => setSoloMode("classic")}
             >
-              {timingMode === "no_timer" ? "Sans chrono activé" : "Sans chrono"}
+              Classic
             </button>
+            {isQvgdmAvailable ? (
+              <button
+                aria-pressed={soloMode === "qvgdm"}
+                className={soloMode === "qvgdm" ? "timing-option timing-option-active qvgdm-mode-pill" : "timing-option"}
+                type="button"
+                onClick={() => setSoloMode("qvgdm")}
+              >
+                QVGDM
+              </button>
+            ) : null}
           </div>
+          {soloMode === "classic" ? (
+            <div className="timing-options" aria-label="Rythme du quiz">
+              <button
+                aria-pressed={timingMode === "no_timer"}
+                className={timingMode === "no_timer" ? "timing-option timing-option-active" : "timing-option"}
+                type="button"
+                onClick={() => setTimingMode((current) => (current === "no_timer" ? "dynamic_timer" : "no_timer"))}
+              >
+                {timingMode === "no_timer" ? "Sans chrono activé" : "Sans chrono"}
+              </button>
+            </div>
+          ) : (
+            <div className="qvgdm-lifeline-preview">
+              <span>50:50</span>
+              <span>Appel 30s</span>
+              <span>Une seule bonne réponse</span>
+            </div>
+          )}
           <label className="question-count-control">
             <span>Questions jouées</span>
             <input
               aria-label="Nombre de questions jouées"
-              max={quiz.questions.length}
+              max={currentQuestionMax}
               min={1}
               type="number"
               value={selectedQuestionCount}
               onChange={(event) => {
                 const nextValue = Number(event.target.value);
                 setSelectedQuestionCount(
-                  Number.isFinite(nextValue) ? Math.max(1, Math.min(quiz.questions.length, nextValue)) : quiz.questions.length
+                  Number.isFinite(nextValue) ? Math.max(1, Math.min(currentQuestionMax, nextValue)) : currentQuestionMax
                 );
               }}
             />
-            <small>/ {quiz.questions.length}</small>
+            <small>/ {currentQuestionMax}</small>
           </label>
-          <button type="button" onClick={start}>
-            Lancer
+          <button type="button" disabled={currentQuestionMax === 0} onClick={start}>
+            {soloMode === "qvgdm" ? "Entrer dans l'arène" : "Lancer"}
           </button>
         </section>
       </main>
@@ -246,13 +404,16 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
 
   if (phase === "finished") {
     return (
-      <main className="stack">
-        <section className="panel stack">
+      <main className={soloMode === "qvgdm" ? "stack qvgdm-screen" : "stack"}>
+        <section className={soloMode === "qvgdm" ? "panel stack qvgdm-final-panel" : "panel stack"}>
           <h1>{quiz.title}</h1>
           <h2>
-            Score : {score} / {sessionQuestions.length}
+            {soloMode === "qvgdm" ? `Gain final : ${formatPrize(qvgdmScore)}` : `Score : ${score} / ${sessionQuestions.length}`}
           </h2>
-          {sessionQuestions.map((finishedQuestion) => {
+          {soloMode === "qvgdm" ? (
+            <p className="muted">Tu as atteint la question {Math.min(questionIndex + 1, sessionQuestions.length)}.</p>
+          ) : null}
+          {soloMode === "classic" ? sessionQuestions.map((finishedQuestion) => {
             const answer = answers[finishedQuestion.id];
             const grade = gradeSoloAnswer(finishedQuestion, answer);
             const correct = grade.status === "perfect";
@@ -275,7 +436,7 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
                 ) : null}
               </article>
             );
-          })}
+          }) : null}
           <div className="row">
             <button type="button" disabled={likedQuizIds.includes(quiz.id)} onClick={likeQuiz}>
               {likedQuizIds.includes(quiz.id) ? "Quiz liké" : "Liker ce quiz"}
@@ -303,37 +464,114 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
   }
 
   return (
-    <main className="stack">
+    <main className={soloMode === "qvgdm" ? "stack qvgdm-screen" : "stack"}>
       <section className="grid">
-        <article className="card">
-          <strong>Solo</strong>
+        <article className={soloMode === "qvgdm" ? "card qvgdm-score-card" : "card"}>
+          <strong>{soloMode === "qvgdm" ? "QVGDM" : "Solo"}</strong>
           <p className="muted">
-            <span className="score-pop" key={score}>
-              {score}
+            <span className="score-pop" key={soloMode === "qvgdm" ? qvgdmScore : score}>
+              {soloMode === "qvgdm" ? formatPrize(qvgdmScore) : score}
             </span>{" "}
-            points
+            {soloMode === "qvgdm" ? "en poche" : "points"}
           </p>
         </article>
       </section>
 
-      <section className="panel stack">
+      <section className={soloMode === "qvgdm" ? "panel stack qvgdm-stage" : "panel stack"}>
         <div className="row" style={{ justifyContent: "space-between" }}>
           <p className="muted">
             Question {questionIndex + 1} / {sessionQuestions.length}
           </p>
-          <p className="muted">{timingMode === "no_timer" ? "Sans chrono" : `${Math.ceil((remainingMs ?? 0) / 1000)}s`}</p>
+          <p className="muted">
+            {isFriendCallActive
+              ? `Appel : ${Math.ceil(Math.max(0, (friendCallEndsAt ?? 0) - now) / 1000)}s`
+              : timingMode === "no_timer" && soloMode !== "qvgdm"
+                ? "Sans chrono"
+                : `${Math.ceil((remainingMs ?? 0) / 1000)}s`}
+          </p>
         </div>
-        {timingMode === "no_timer" ? (
+        {soloMode === "qvgdm" ? (
+          <div className="qvgdm-stage-grid">
+            <aside className="qvgdm-ladder" aria-label="Échelle des gains">
+              {Array.from({ length: Math.max(sessionQuestions.length, 1) }, (_, index) => qvgdmPrizeForIndex(index))
+                .map((prize, index) => (
+                  <span
+                    className={
+                      index === questionIndex
+                        ? "qvgdm-prize qvgdm-prize-current"
+                        : index < questionIndex
+                          ? "qvgdm-prize qvgdm-prize-won"
+                          : "qvgdm-prize"
+                    }
+                    key={prize}
+                  >
+                    {index + 1}. {formatPrize(prize)}
+                  </span>
+                ))
+                .reverse()}
+            </aside>
+            <div className="stack qvgdm-question-zone">
+              <div className="qvgdm-timer" aria-hidden="true">
+                <div className="qvgdm-timer-fill" style={{ width: `${remainingRatio * 100}%` }} />
+              </div>
+              <h1>Qui veut gagner des millions ?</h1>
+              <h2>{question.prompt}</h2>
+              {question.imageUrl ? <img className="question-image" src={question.imageUrl} alt="" /> : null}
+              <div className="qvgdm-lifelines">
+                <button className="qvgdm-lifeline-button" disabled={hasUsedFiftyFifty || phase !== "playing"} type="button" onClick={useFiftyFifty}>
+                  50:50
+                </button>
+                <button
+                  className="qvgdm-lifeline-button"
+                  disabled={hasUsedFriendCall || isFriendCallActive || phase !== "playing"}
+                  type="button"
+                  onClick={useFriendCall}
+                >
+                  Appel d'un ami
+                </button>
+              </div>
+              {isFriendCallActive ? <div className="no-timer-track">Temps gelé pendant l'appel.</div> : null}
+              <div className="qvgdm-answer-grid">
+                {question.answerOptions.map((option, index) => {
+                  const isHidden = hiddenQvgdmOptionIds.includes(option.id);
+
+                  return (
+                    <button
+                      className={answerChoiceClass(option.id)}
+                      disabled={phase !== "playing" || isHidden}
+                      key={option.id}
+                      type="button"
+                      onClick={() => finishQvgdmQuestion(option.id)}
+                    >
+                      <span className="qvgdm-answer-letter">{String.fromCharCode(65 + index)}</span>
+                      <span>{isHidden ? "Réponse éliminée" : option.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              {phase === "review" ? (
+                <div className="explanation-panel stack">
+                  <p className="success-text">
+                    Bonne réponse. Tu passes à {questionIndex >= sessionQuestions.length - 1 ? "la victoire finale" : `la question ${questionIndex + 2}`}.
+                  </p>
+                  <button className="commit-answer-button" type="button" onClick={skipExplanations}>
+                    {questionIndex >= sessionQuestions.length - 1 ? "Voir le gain final" : "Continuer"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : timingMode === "no_timer" ? (
           <div className="no-timer-track">La question passera quand tu auras validé ta réponse.</div>
         ) : (
           <div className="timer-track" aria-hidden="true">
             <div className="timer-fill" style={{ width: `${remainingRatio * 100}%` }} />
           </div>
         )}
-        <h1>{quiz.title}</h1>
-        <h2>{question.prompt}</h2>
-        {question.imageUrl && question.type !== "IMAGE_REGION" ? <img className="question-image" src={question.imageUrl} alt="" /> : null}
-        {question.type === "IMAGE_REGION" ? (
+        {soloMode === "classic" ? <h1>{quiz.title}</h1> : null}
+        {soloMode === "classic" ? <h2>{question.prompt}</h2> : null}
+        {soloMode === "classic" && question.imageUrl && question.type !== "IMAGE_REGION" ? <img className="question-image" src={question.imageUrl} alt="" /> : null}
+        {soloMode === "classic" && question.type === "IMAGE_REGION" ? (
           <ImageRegionPlayer
             correctRegions={phase === "review" ? question.imageRegions ?? [] : []}
             disabled={phase !== "playing"}
@@ -342,14 +580,14 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
             showCorrectRegions={phase === "review"}
             onSelect={selectImagePoint}
           />
-        ) : question.type === "OPEN_TEXT" ? (
+        ) : soloMode === "classic" && question.type === "OPEN_TEXT" ? (
           <input
             disabled={phase !== "playing"}
             value={textAnswer}
             onChange={(event) => setTextAnswer(event.target.value)}
             placeholder="Ta réponse"
           />
-        ) : (
+        ) : soloMode === "classic" ? (
           <div className="grid">
             {question.answerOptions.map((option) => (
               <button
@@ -366,8 +604,8 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
               </button>
             ))}
           </div>
-        )}
-        {phase === "review" ? (
+        ) : null}
+        {phase === "review" && soloMode === "classic" ? (
           <div className="explanation-panel stack">
             {question.type === "IMAGE_REGION" ? (
               question.imageRegionExplanation ? <p className="muted">{question.imageRegionExplanation}</p> : null
@@ -386,7 +624,7 @@ export function SoloQuizClient({ quiz }: { quiz: SoloQuiz }) {
             </button>
           </div>
         ) : null}
-        {phase === "playing" ? (
+        {phase === "playing" && soloMode === "classic" ? (
           <button
             aria-pressed={answerValidated}
             className={answerValidated ? "commit-answer-button commit-answer-button-active" : "commit-answer-button"}
@@ -577,6 +815,43 @@ function scoreRatioForMistakes(mistakes: number): number {
   if (mistakes === 1) return 0.5;
   if (mistakes === 2) return 0.2;
   return 0;
+}
+
+function isSoloQvgdmCompatibleQuestion(question: SoloQuiz["questions"][number]): boolean {
+  return isQvgdmCompatibleQuestion({
+    type: question.type,
+    answerOptions: question.answerOptions
+  });
+}
+
+function buildQvgdmQuestions(questions: SoloQuiz["questions"]): SoloQuiz["questions"] {
+  return shuffleArray(questions.filter(isSoloQvgdmCompatibleQuestion))
+    .map((question) => {
+      const correctOption = shuffleArray(question.answerOptions.filter((option) => option.isCorrect))[0];
+      const wrongOptions = shuffleArray(question.answerOptions.filter((option) => !option.isCorrect)).slice(0, 3);
+
+      if (!correctOption || wrongOptions.length < 3) {
+        return null;
+      }
+
+      return {
+        ...question,
+        answerOptions: shuffleArray([correctOption, ...wrongOptions])
+      };
+    })
+    .filter((question): question is SoloQuiz["questions"][number] => question !== null);
+}
+
+function qvgdmPrizeForIndex(index: number): number {
+  return qvgdmPrizeScale[index] ?? qvgdmPrizeScale.at(-1)! * 2 ** (index - qvgdmPrizeScale.length + 1);
+}
+
+function formatPrize(value: number): string {
+  return new Intl.NumberFormat("fr-FR", {
+    style: "currency",
+    currency: "EUR",
+    maximumFractionDigits: 0
+  }).format(value);
 }
 
 function isPointInRegion(point: ImagePointDto, region: ImageRegionDto): boolean {
