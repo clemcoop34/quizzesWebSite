@@ -304,9 +304,6 @@ export function DashboardClient({
                   Éditer
                 </button>
               </div>
-              {!isSoloAvailable ? (
-                <p className="muted">Ce quiz se lance en room avec le mode Face-à-face.</p>
-              ) : null}
               </>
                 );
               })()}
